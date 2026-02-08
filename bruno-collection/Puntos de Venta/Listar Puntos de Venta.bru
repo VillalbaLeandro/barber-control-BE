@@ -1,0 +1,24 @@
+meta {
+  name: Listar Puntos de Venta
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/puntos-venta
+  body: none
+  auth: none
+}
+
+docs {
+  Obtiene la lista de todos los puntos de venta.
+  
+  Respuesta esperada: Array de objetos con:
+  - id (uuid)
+  - nombre
+  - codigo
+  - direccion
+  - activo (boolean)
+  - creado_en
+  - actualizado_en
+}

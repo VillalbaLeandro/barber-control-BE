@@ -1,0 +1,55 @@
+meta {
+  name: Confirmar Venta
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/ventas/confirmar
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "staff_id": 1,
+    "punto_venta_id": 1,
+    "items": [
+      {
+        "tipo": "servicio",
+        "id": 1,
+        "cantidad": 1,
+        "precio": 2500
+      },
+      {
+        "tipo": "producto",
+        "id": 1,
+        "cantidad": 2,
+        "precio": 500
+      }
+    ],
+    "total": 3500,
+    "metodo_pago": "efectivo"
+  }
+}
+
+docs {
+  Confirma una venta con servicios y/o productos.
+  
+  Campos requeridos:
+  - staff_id: ID del staff que realiza la venta
+  - punto_venta_id: ID del punto de venta
+  - items: Array de items (servicios o productos)
+    - tipo: "servicio" | "producto"
+    - id: ID del item
+    - cantidad: Cantidad vendida
+    - precio: Precio unitario
+  - total: Total de la venta
+  - metodo_pago: Método de pago utilizado
+  
+  Respuesta esperada (200):
+  {
+    "success": true,
+    "venta_id": 123
+  }
+}

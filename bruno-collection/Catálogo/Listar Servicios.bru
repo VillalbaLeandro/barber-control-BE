@@ -1,0 +1,26 @@
+meta {
+  name: Listar Servicios
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/catalogo/servicios
+  body: none
+  auth: none
+}
+
+docs {
+  Obtiene el catálogo completo de servicios disponibles.
+  
+  Respuesta esperada: Array de objetos con:
+  - id (uuid)
+  - nombre
+  - categoria
+  - precio_actual
+  - activo (boolean)
+  - orden_ui
+  - duracion_min
+  - creado_en
+  - actualizado_en
+}

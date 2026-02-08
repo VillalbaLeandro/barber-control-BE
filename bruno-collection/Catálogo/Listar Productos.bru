@@ -1,0 +1,28 @@
+meta {
+  name: Listar Productos
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/catalogo/productos
+  body: none
+  auth: none
+}
+
+docs {
+  Obtiene el catálogo completo de productos disponibles.
+  
+  Respuesta esperada: Array de objetos con:
+  - id (uuid)
+  - nombre
+  - categoria
+  - precio_venta_actual
+  - costo_actual
+  - activo (boolean)
+  - permite_consumo_staff (boolean)
+  - orden_ui
+  - maneja_stock (boolean)
+  - stock_actual
+  - stock_minimo
+}

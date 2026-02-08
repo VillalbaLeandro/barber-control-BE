@@ -1,0 +1,29 @@
+meta {
+  name: Liquidar Consumos - Perdonar
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/consumos/liquidar
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "consumoIds": ["{{consumoId}}"],
+    "reglaAplicada": "perdonado",
+    "motivo": "Consumo autorizado por gerencia"
+  }
+}
+
+tests {
+  test("Status code is 200", function() {
+    expect(res.getStatus()).to.equal(200);
+  });
+  
+  test("Monto cobrado is 0", function() {
+    expect(res.getBody().montoCobradoTotal).to.equal(0);
+  });
+}

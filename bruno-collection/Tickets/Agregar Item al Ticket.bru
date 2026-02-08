@@ -1,0 +1,52 @@
+meta {
+  name: Agregar Item al Ticket
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/ventas/ticket/TICKET_ID_AQUI/agregar-item
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "tipo": "servicio",
+    "itemId": "7f5bfc62-ed7c-4fb3-bc3a-b831be80cf60",
+    "cantidad": 1,
+    "precio": 2500
+  }
+}
+
+docs {
+  Agrega un servicio o producto al ticket.
+  
+  Campos:
+  - tipo: "servicio" | "producto"
+  - itemId: UUID del servicio o producto
+  - cantidad: Cantidad a agregar
+  - precio: Precio unitario
+  
+  El endpoint calcula automáticamente el subtotal y actualiza el total del ticket.
+  
+  Respuesta esperada (200):
+  {
+    "ticketId": "uuid",
+    "staffId": "uuid",
+    "puntoVentaId": "uuid",
+    "items": [
+      {
+        "tipo": "servicio",
+        "itemId": "uuid",
+        "cantidad": 1,
+        "precio": 2500,
+        "subtotal": 2500
+      }
+    ],
+    "total": 2500,
+    "estado": "draft"
+  }
+  
+  Nota: Reemplaza TICKET_ID_AQUI con el ID del ticket creado
+}

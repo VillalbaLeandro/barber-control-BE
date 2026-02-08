@@ -1,0 +1,35 @@
+meta {
+  name: Crear Ticket
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/ventas/crear-ticket
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "staffId": "{{staffId}}",
+    "puntoVentaId": "fad124de-ad32-4e29-bf2a-c3c381fc1777"
+  }
+}
+
+docs {
+  Crea un nuevo ticket (carrito) temporal para iniciar una venta.
+  
+  El ticket se crea en estado 'draft' con items vacíos.
+  
+  Respuesta esperada (200):
+  {
+    "ticketId": "uuid",
+    "staffId": "uuid",
+    "puntoVentaId": "uuid",
+    "items": [],
+    "total": 0,
+    "estado": "draft",
+    "creadoEn": "2026-02-07T21:00:00.000Z"
+  }
+}

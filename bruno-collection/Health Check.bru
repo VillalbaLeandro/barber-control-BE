@@ -1,0 +1,21 @@
+meta {
+  name: Health Check
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/
+  body: none
+  auth: none
+}
+
+docs {
+  Verifica el estado del servidor y la conexión a la base de datos.
+  
+  Respuesta esperada:
+  {
+    "status": "ok",
+    "database": "connected"
+  }
+}

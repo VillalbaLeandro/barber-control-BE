@@ -1,0 +1,40 @@
+meta {
+  name: Establecer Punto de Venta
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/session/punto-venta
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "staffId": "{{staffId}}",
+    "puntoVentaId": "fad124de-ad32-4e29-bf2a-c3c381fc1777"
+  }
+}
+
+docs {
+  Establece el punto de venta activo para la sesión del staff.
+  
+  Valida que:
+  - El staff existe
+  - El punto de venta existe y está activo
+  - Registra la sesión para auditoría
+  
+  Respuesta esperada (200):
+  {
+    "success": true,
+    "session": {
+      "staffId": "uuid",
+      "staffNombre": "Juan Pérez",
+      "staffRol": "peluquero",
+      "puntoVentaId": "uuid",
+      "puntoVentaNombre": "Local Centro",
+      "puntoVentaCodigo": "LC01"
+    }
+  }
+}

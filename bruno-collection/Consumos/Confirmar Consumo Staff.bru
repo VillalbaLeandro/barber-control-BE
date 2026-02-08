@@ -1,0 +1,41 @@
+meta {
+  name: Confirmar Consumo Staff
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/consumos/confirmar
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "staff_id": 1,
+    "items": [
+      {
+        "producto_id": 1,
+        "cantidad": 1
+      }
+    ]
+  }
+}
+
+docs {
+  Registra el consumo de productos por parte del staff.
+  
+  Campos requeridos:
+  - staff_id: ID del staff que consume
+  - items: Array de productos consumidos
+    - producto_id: ID del producto
+    - cantidad: Cantidad consumida
+  
+  Respuesta esperada (200):
+  {
+    "success": true,
+    "consumo_id": 456
+  }
+  
+  Nota: Solo se pueden consumir productos con permite_consumo_staff = true
+}

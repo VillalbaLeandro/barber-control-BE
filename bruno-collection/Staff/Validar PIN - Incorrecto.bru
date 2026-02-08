@@ -1,0 +1,30 @@
+meta {
+  name: Validar PIN - Incorrecto
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/staff/validar-pin
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "pin": "9999",
+    "staffId": "{{staffId}}"
+  }
+}
+
+docs {
+  Prueba la validación con un PIN incorrecto.
+  
+  Respuesta esperada (401):
+  {
+    "error": "PIN incorrecto",
+    "intentos_restantes": 4
+  }
+  
+  Nota: Después de 5 intentos fallidos, la cuenta se bloqueará por 15 minutos.
+}

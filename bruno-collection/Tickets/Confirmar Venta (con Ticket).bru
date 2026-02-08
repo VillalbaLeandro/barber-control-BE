@@ -1,0 +1,70 @@
+meta {
+  name: Confirmar Venta (con Ticket)
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/ventas/confirmar
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "staff_id": 1,
+    "punto_venta_id": 1,
+    "ticketId": "TICKET_UUID_AQUI",
+    "total": 2500,
+    "metodo_pago": "efectivo"
+  }
+}
+
+docs {
+  Confirma una venta usando un ticket previamente creado.
+  
+  **Modo 1: Con Ticket (Recomendado)**
+  - Provee `ticketId` (UUID del ticket)
+  - NO proveas `items` (se cargan del ticket)
+  - El endpoint valida que el total coincida
+  - Marca el ticket como `confirmed`
+  
+  **Modo 2: Sin Ticket (Legacy)**
+  - NO proveas `ticketId`
+  - Provee `items` manualmente:
+    ```json
+    {
+      "staff_id": 1,
+      "punto_venta_id": 1,
+      "items": [
+        {
+          "tipo": "servicio",
+          "id": 1,
+          "cantidad": 1,
+          "precio": 2500
+        }
+      ],
+      "total": 2500,
+      "metodo_pago": "efectivo"
+    }
+    ```
+  
+  **Validaciones:**
+  - Si viene `ticketId`, verifica que exista y esté en estado `draft`
+  - Valida que el total coincida con el ticket (tolerancia: 0.01)
+  - Requiere al menos un item (del ticket o manual)
+  
+  **Respuesta esperada (200):**
+  ```json
+  {
+    "success": true,
+    "venta_id": 123
+  }
+  ```
+  
+  **Errores posibles:**
+  - 404: Ticket no encontrado
+  - 400: Ticket ya procesado
+  - 400: Total no coincide
+  - 400: No hay items para confirmar
+}

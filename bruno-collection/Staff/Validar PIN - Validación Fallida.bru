@@ -1,0 +1,39 @@
+meta {
+  name: Validar PIN - Validación Fallida
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/staff/validar-pin
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "pin": "12345",
+    "staffId": "not-a-uuid"
+  }
+}
+
+docs {
+  Prueba la validación de Zod con datos inválidos.
+  
+  Respuesta esperada (400):
+  {
+    "error": "Validation Error",
+    "details": [
+      {
+        "code": "invalid_string",
+        "message": "String must contain exactly 4 character(s)",
+        "path": ["pin"]
+      },
+      {
+        "code": "invalid_string",
+        "message": "Invalid uuid",
+        "path": ["staffId"]
+      }
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+meta {
+  name: Validar PIN - Correcto
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/staff/validar-pin
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "pin": "{{pin}}",
+    "staffId": "{{staffId}}"
+  }
+}
+
+docs {
+  Valida el PIN de un miembro del staff.
+  
+  Seguridad implementada:
+  - Rate limit: 5 intentos por minuto
+  - Bloqueo temporal: 15 minutos después de 5 intentos fallidos
+  - Tracking de intentos fallidos
+  
+  Respuesta exitosa (200):
+  {
+    "id": "uuid",
+    "nombre": "Nombre del staff",
+    "rol": "peluquero"
+  }
+}

@@ -1,0 +1,28 @@
+meta {
+  name: Obtener Ticket
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/ventas/ticket/TICKET_ID_AQUI
+  body: none
+  auth: none
+}
+
+docs {
+  Obtiene el estado actual de un ticket.
+  
+  Respuesta esperada (200):
+  {
+    "ticketId": "uuid",
+    "staffId": "uuid",
+    "puntoVentaId": "uuid",
+    "items": [...],
+    "total": 2500,
+    "estado": "draft",
+    "creadoEn": "2026-02-07T21:00:00.000Z"
+  }
+  
+  Nota: Reemplaza TICKET_ID_AQUI con el ID del ticket
+}

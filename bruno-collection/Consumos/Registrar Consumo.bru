@@ -1,0 +1,54 @@
+meta {
+  name: Registrar Consumo
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/consumos/registrar
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "staffId": "{{staffId}}",
+    "puntoVentaId": "{{puntoVentaId}}",
+    "items": [
+      {
+        "tipo": "producto",
+        "itemId": "{{productoId}}",
+        "nombre": "Navaja Descartable",
+        "cantidad": 2,
+        "precioVenta": 500,
+        "precioCosto": 200,
+        "subtotalVenta": 1000,
+        "subtotalCosto": 400
+      },
+      {
+        "tipo": "producto",
+        "itemId": "{{productoId2}}",
+        "nombre": "Agua Mineral",
+        "cantidad": 1,
+        "precioVenta": 300,
+        "precioCosto": 150,
+        "subtotalVenta": 300,
+        "subtotalCosto": 150
+      }
+    ]
+  }
+}
+
+tests {
+  test("Status code is 200", function() {
+    expect(res.getStatus()).to.equal(200);
+  });
+  
+  test("Response has consumoId", function() {
+    expect(res.getBody()).to.have.property('consumoId');
+  });
+  
+  test("Estado is pendiente", function() {
+    expect(res.getBody().estadoLiquidacion).to.equal('pendiente');
+  });
+}
