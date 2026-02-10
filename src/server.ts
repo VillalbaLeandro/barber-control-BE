@@ -11,6 +11,8 @@ import staffRoutes from './routes/staff.js'
 import ticketRoutes from './routes/tickets.js'
 import sessionRoutes from './routes/session.js'
 import consumosRoutes from './routes/consumos.js'
+import adminRoutes from './routes/admin.js'
+import rlsMiddleware from './middleware/rls.js'
 
 const fastify = Fastify({
     logger: true
@@ -26,6 +28,10 @@ await fastify.register(rateLimit, {
     timeWindow: '1 minute'
 })
 
+// 🔒 Register RLS Middleware - CRITICAL FOR SECURITY
+// This MUST be registered before routes to ensure all queries are filtered by empresa_id
+await fastify.register(rlsMiddleware)
+
 // Register routes
 await fastify.register(posRoutes)
 await fastify.register(catalogRoutes)
@@ -34,6 +40,7 @@ await fastify.register(salesRoutes)
 await fastify.register(ticketRoutes)
 await fastify.register(sessionRoutes)
 await fastify.register(consumosRoutes)
+await fastify.register(adminRoutes)
 
 // Health check route
 fastify.get('/', async (request, reply) => {

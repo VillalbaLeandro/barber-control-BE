@@ -27,14 +27,14 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             // Crear ticket temporal (staffId puede ser null para tickets anónimos)
             const ticket = await sql`
-                INSERT INTO tickets (staff_id, punto_venta_id, items, total, estado, creado_en)
+                INSERT INTO tickets (usuario_id, punto_venta_id, items, total, estado, creado_en)
                 VALUES (${staffId || null}, ${puntoVentaId}, '[]'::jsonb, 0, 'draft', NOW())
-                RETURNING id, staff_id, punto_venta_id, items, total, estado, creado_en
+                RETURNING id, usuario_id, punto_venta_id, items, total, estado, creado_en
             `
 
             return {
                 ticketId: ticket[0].id,
-                staffId: ticket[0].staff_id,
+                staffId: ticket[0].usuario_id,
                 puntoVentaId: ticket[0].punto_venta_id,
                 items: ticket[0].items,
                 total: ticket[0].total,
@@ -56,7 +56,7 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
             const { id } = request.params as { id: string }
 
             const ticket = await sql`
-                SELECT id, staff_id, punto_venta_id, items, total, estado, creado_en
+                SELECT id, usuario_id, punto_venta_id, items, total, estado, creado_en
                 FROM tickets
                 WHERE id = ${id}
             `
@@ -67,7 +67,7 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             return {
                 ticketId: ticket[0].id,
-                staffId: ticket[0].staff_id,
+                staffId: ticket[0].usuario_id,
                 puntoVentaId: ticket[0].punto_venta_id,
                 items: ticket[0].items,
                 total: ticket[0].total,
@@ -147,12 +147,12 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     total = ${nuevoTotal},
                     actualizado_en = NOW()
                 WHERE id = ${id}
-                RETURNING id, staff_id, punto_venta_id, items, total, estado, creado_en
+                RETURNING id, usuario_id, punto_venta_id, items, total, estado, creado_en
             `
 
             return {
                 ticketId: ticketActualizado[0].id,
-                staffId: ticketActualizado[0].staff_id,
+                staffId: ticketActualizado[0].usuario_id,
                 puntoVentaId: ticketActualizado[0].punto_venta_id,
                 items: ticketActualizado[0].items,
                 total: Number(ticketActualizado[0].total),
@@ -224,12 +224,12 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     total = ${nuevoTotal},
                     actualizado_en = NOW()
                 WHERE id = ${id}
-                RETURNING id, staff_id, punto_venta_id, items, total, estado, creado_en
+                RETURNING id, usuario_id, punto_venta_id, items, total, estado, creado_en
             `
 
             return {
                 ticketId: ticketActualizado[0].id,
-                staffId: ticketActualizado[0].staff_id,
+                staffId: ticketActualizado[0].usuario_id,
                 puntoVentaId: ticketActualizado[0].punto_venta_id,
                 items: ticketActualizado[0].items,
                 total: Number(ticketActualizado[0].total),
@@ -293,12 +293,12 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     total = ${nuevoTotal},
                     actualizado_en = NOW()
                 WHERE id = ${id}
-                RETURNING id, staff_id, punto_venta_id, items, total, estado
+                RETURNING id, usuario_id, punto_venta_id, items, total, estado
             `
 
             return {
                 ticketId: ticketActualizado[0].id,
-                staffId: ticketActualizado[0].staff_id,
+                staffId: ticketActualizado[0].usuario_id,
                 puntoVentaId: ticketActualizado[0].punto_venta_id,
                 items: ticketActualizado[0].items,
                 total: ticketActualizado[0].total,

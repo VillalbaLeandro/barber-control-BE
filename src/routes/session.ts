@@ -17,7 +17,7 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
             // Verificar que el staff existe
             // Corrección Schema: nombre -> nombre_completo, rol -> 'barber' (default)
             const staff = await sql`
-                SELECT id, nombre_completo as nombre, 'barber' as rol FROM staff WHERE id = ${staffId}
+                SELECT id, nombre_completo as nombre, 'barber' as rol FROM usuarios WHERE id = ${staffId}
             `
 
             if (staff.length === 0) {
@@ -43,14 +43,17 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
             }
 
             // Registrar sesión (opcional - para auditoría)
+            // Primero cerrar sesiones anteriores del usuario
             await sql`
-                INSERT INTO sesiones (staff_id, punto_venta_id, inicio_sesion)
+                UPDATE sesiones
+                SET fin_sesion = NOW()
+                WHERE usuario_id = ${staffId} AND fin_sesion IS NULL
+            `
+
+            // Crear nueva sesión
+            await sql`
+                INSERT INTO sesiones (usuario_id, punto_venta_id, inicio_sesion)
                 VALUES (${staffId}, ${puntoVentaId}, NOW())
-                ON CONFLICT (staff_id) 
-                DO UPDATE SET 
-                    punto_venta_id = ${puntoVentaId},
-                    inicio_sesion = NOW(),
-                    fin_sesion = NULL
             `
 
             console.log('✅ Sesión establecida para:', staff[0].nombre);
@@ -84,7 +87,7 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
             await sql`
                 UPDATE sesiones
                 SET fin_sesion = NOW()
-                WHERE staff_id = ${staffId} AND fin_sesion IS NULL
+                WHERE usuario_id = ${staffId} AND fin_sesion IS NULL
             `
 
             return { success: true }
@@ -104,13 +107,13 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             // Corrección Schema: st.nombre -> st.nombre_completo, st.rol -> 'barber'
             const sesion = await sql`
-                SELECT s.staff_id, st.nombre_completo as staff_nombre, 'barber' as staff_rol,
+                SELECT s.usuario_id, st.nombre_completo as staff_nombre, 'barber' as staff_rol,
                        s.punto_venta_id, pv.nombre as punto_venta_nombre, pv.codigo as punto_venta_codigo,
                        s.inicio_sesion
                 FROM sesiones s
-                JOIN staff st ON s.staff_id = st.id
+                JOIN usuarios st ON s.usuario_id = st.id
                 JOIN puntos_venta pv ON s.punto_venta_id = pv.id
-                WHERE s.staff_id = ${staffId} AND s.fin_sesion IS NULL
+                WHERE s.usuario_id = ${staffId} AND s.fin_sesion IS NULL
                 ORDER BY s.inicio_sesion DESC
                 LIMIT 1
             `
@@ -120,7 +123,7 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
             }
 
             return {
-                staffId: sesion[0].staff_id,
+                staffId: sesion[0].usuario_id,
                 staffNombre: sesion[0].staff_nombre,
                 staffRol: sesion[0].staff_rol,
                 puntoVentaId: sesion[0].punto_venta_id,

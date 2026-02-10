@@ -12,9 +12,9 @@ const registrarConsumoSchema = z.object({
         nombre: z.string(),
         cantidad: z.number().positive(),
         precioVenta: z.number().positive(),
-        precioCosto: z.number().positive(),
+        precioCosto: z.number().nonnegative(), // Permitir 0 para servicios
         subtotalVenta: z.number().positive(),
-        subtotalCosto: z.number().positive()
+        subtotalCosto: z.number().nonnegative() // Permitir 0 para servicios
     })).min(1)
 })
 
@@ -29,6 +29,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
     // Registrar consumo del staff
     fastify.post('/consumos/registrar', async (request, reply) => {
         try {
+            console.log('📦 Registrando consumo, body:', JSON.stringify(request.body, null, 2));
             const { staffId, puntoVentaId, items } = registrarConsumoSchema.parse(request.body)
 
             // Calcular totales
@@ -38,7 +39,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
             // Crear consumo
             const consumo = await sql`
                 INSERT INTO consumos_staff (
-                    staff_id, 
+                    usuario_id, 
                     punto_venta_id, 
                     items, 
                     total_venta, 
@@ -55,12 +56,12 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     'pendiente',
                     NOW()
                 )
-                RETURNING id, staff_id, punto_venta_id, items, total_venta, total_costo, estado_liquidacion, creado_en
+                RETURNING id, usuario_id, punto_venta_id, items, total_venta, total_costo, estado_liquidacion, creado_en
             `
 
             return {
                 consumoId: consumo[0].id,
-                staffId: consumo[0].staff_id,
+                staffId: consumo[0].usuario_id,
                 puntoVentaId: consumo[0].punto_venta_id,
                 items: consumo[0].items,
                 totalVenta: consumo[0].total_venta,
@@ -70,6 +71,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
             }
         } catch (err) {
             if (err instanceof z.ZodError) {
+                console.error('❌ Validation Error en consumos:', err.errors);
                 return reply.code(400).send({ error: 'Validation Error', details: err.errors })
             }
             fastify.log.error(err)
@@ -77,14 +79,15 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
         }
     })
 
-    // Listar consumos pendientes
-    fastify.get('/consumos/pendientes', async (request, reply) => {
+    // Listar consumos (con filtros múltiples)
+    fastify.get('/consumos', async (request, reply) => {
         try {
-            const { staffId, puntoVentaId, fechaDesde, fechaHasta, limit = 50, offset = 0 } = request.query as {
+            const { staffId, puntoVentaId, fechaDesde, fechaHasta, estado, limit = 50, offset = 0 } = request.query as {
                 staffId?: string
                 puntoVentaId?: string
                 fechaDesde?: string
                 fechaHasta?: string
+                estado?: string
                 limit?: number
                 offset?: number
             }
@@ -92,7 +95,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
             let query = sql`
                 SELECT 
                     c.id,
-                    c.staff_id,
+                    c.usuario_id,
                     s.nombre_completo as staff_nombre,
                     c.punto_venta_id,
                     pv.nombre as punto_venta_nombre,
@@ -101,16 +104,20 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     c.total_costo,
                     c.estado_liquidacion,
                     c.creado_en,
-                    c.liquidado_en
+                    c.liquidado_en,
+                    l.regla_aplicada,
+                    l.monto_cobrado,
+                    l.motivo
                 FROM consumos_staff c
-                JOIN staff s ON c.staff_id = s.id
+                JOIN usuarios s ON c.usuario_id = s.id
                 JOIN puntos_venta pv ON c.punto_venta_id = pv.id
+                LEFT JOIN liquidaciones_consumo l ON c.id = l.consumo_id
                 WHERE 1=1
             `
 
             // Filtros opcionales
             if (staffId) {
-                query = sql`${query} AND c.staff_id = ${staffId}`
+                query = sql`${query} AND c.usuario_id = ${staffId}`
             }
             if (puntoVentaId) {
                 query = sql`${query} AND c.punto_venta_id = ${puntoVentaId}`
@@ -121,6 +128,14 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
             if (fechaHasta) {
                 query = sql`${query} AND c.creado_en <= ${fechaHasta}::timestamp`
             }
+            if (estado) {
+                if (estado === 'historial') {
+                    // Historial = todo lo que NO es pendiente
+                    query = sql`${query} AND c.estado_liquidacion != 'pendiente'`
+                } else {
+                    query = sql`${query} AND c.estado_liquidacion = ${estado}`
+                }
+            }
 
             query = sql`${query} ORDER BY c.creado_en DESC LIMIT ${limit} OFFSET ${offset}`
 
@@ -128,7 +143,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             return consumos.map(c => ({
                 consumoId: c.id,
-                staffId: c.staff_id,
+                staffId: c.usuario_id,
                 staffNombre: c.staff_nombre,
                 puntoVentaId: c.punto_venta_id,
                 puntoVentaNombre: c.punto_venta_nombre,
@@ -137,7 +152,12 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 totalCosto: c.total_costo,
                 estadoLiquidacion: c.estado_liquidacion,
                 creadoEn: c.creado_en,
-                liquidadoEn: c.liquidado_en
+                liquidadoEn: c.liquidado_en,
+                liquidacion: c.regla_aplicada ? {
+                    reglaAplicada: c.regla_aplicada,
+                    montoCobrado: c.monto_cobrado,
+                    motivo: c.motivo
+                } : null
             }))
         } catch (err) {
             fastify.log.error(err)
@@ -196,7 +216,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
             })
 
             // Crear liquidaciones y actualizar consumos en transacción
-            await sql.begin(async txn => {
+            await sql.begin(async (txn: any) => {
                 // Crear registros de liquidación
                 for (const liq of liquidaciones) {
                     await txn`
@@ -264,7 +284,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
             let query = sql`
                 SELECT 
                     c.id,
-                    c.staff_id,
+                    c.usuario_id,
                     c.punto_venta_id,
                     pv.nombre as punto_venta_nombre,
                     c.items,
@@ -279,7 +299,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 FROM consumos_staff c
                 JOIN puntos_venta pv ON c.punto_venta_id = pv.id
                 LEFT JOIN liquidaciones_consumo l ON c.id = l.consumo_id
-                WHERE c.staff_id = ${staffId}
+                WHERE c.usuario_id = ${staffId}
             `
 
             if (fechaDesde) {
@@ -298,7 +318,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             return consumos.map(c => ({
                 consumoId: c.id,
-                staffId: c.staff_id,
+                staffId: c.usuario_id,
                 puntoVentaId: c.punto_venta_id,
                 puntoVentaNombre: c.punto_venta_nombre,
                 items: c.items,

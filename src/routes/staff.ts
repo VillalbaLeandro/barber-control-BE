@@ -8,6 +8,22 @@ const validarPinSchema = z.object({
 })
 
 const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
+    // Listar todo el staff (público por ahora, luego admin)
+    fastify.get('/staff', async (request, reply) => {
+        try {
+            const staff = await sql`
+                SELECT id, nombre_completo as nombre, 'barber' as rol, bloqueado_hasta
+                FROM usuarios
+                WHERE activo = true
+                ORDER BY nombre_completo ASC
+            `
+            return staff
+        } catch (err) {
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Internal Server Error' })
+        }
+    })
+
     // Rate limit por IP + staffId para frenar bots y ataques distribuidos
     fastify.post('/staff/validar-pin', {
         config: {
@@ -35,17 +51,17 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             if (staffId) {
                 const staffData = await sql`
-                    SELECT id, nombre_completo as nombre, 'barber' as rol, pin_hash as pin, bloqueado_hasta, intentos_pin_fallidos
-                    FROM staff 
+                    SELECT id, nombre_completo as nombre, 'barber' as rol, password_hash as pin, bloqueado_hasta, intentos_fallidos
+                    FROM usuarios 
                     WHERE id = ${staffId}
                 `
                 if (staffData.length === 0) return reply.code(404).send({ error: 'Staff no encontrado' })
                 staff = staffData[0]
             } else {
                 const staffData = await sql`
-                    SELECT id, nombre_completo as nombre, 'barber' as rol, pin_hash as pin, bloqueado_hasta, intentos_pin_fallidos
-                    FROM staff 
-                    WHERE pin_hash = ${pin}
+                    SELECT id, nombre_completo as nombre, 'barber' as rol, password_hash as pin, bloqueado_hasta, intentos_fallidos
+                    FROM usuarios 
+                    WHERE password_hash = ${pin}
                 `
                 if (staffData.length === 0) {
                     return reply.code(401).send({ error: 'PIN incorrecto' })
@@ -66,18 +82,18 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 // UPDATE ATÓMICO
                 // Usamos intentos_pin_fallidos (confirmado por debug script)
                 const updateResult = await sql`
-                    UPDATE staff 
-                    SET intentos_pin_fallidos = intentos_pin_fallidos + 1,
+                    UPDATE usuarios 
+                    SET intentos_fallidos = intentos_fallidos + 1,
                         bloqueado_hasta = CASE 
-                            WHEN intentos_pin_fallidos + 1 >= 5 
+                            WHEN intentos_fallidos + 1 >= 5 
                             THEN NOW() + INTERVAL '15 minutes'
                             ELSE bloqueado_hasta
                         END
                     WHERE id = ${staff.id}
-                    RETURNING intentos_pin_fallidos, bloqueado_hasta
+                    RETURNING intentos_fallidos, bloqueado_hasta
                 `
 
-                const nuevosIntentos = updateResult[0].intentos_pin_fallidos
+                const nuevosIntentos = updateResult[0].intentos_fallidos
                 const bloqueado = updateResult[0].bloqueado_hasta
 
                 if (bloqueado && nuevosIntentos >= 5) {
@@ -95,8 +111,8 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             // PIN correcto - resetear intentos
             await sql`
-                UPDATE staff 
-                SET intentos_pin_fallidos = 0,
+                UPDATE usuarios 
+                SET intentos_fallidos = 0,
                     bloqueado_hasta = NULL
                 WHERE id = ${staff.id}
             `
