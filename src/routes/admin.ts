@@ -1,15 +1,126 @@
 import { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
-import sql from '../db.js'
+import sql from '../db-admin.js'
+import sqlAdmin from '../db-admin.js'
 import { authService } from '../services/auth.js'
-import { getDefaultEmpresaId } from '../utils/empresa.js'
+import { getDefaultEmpresaId, obtenerEmpresaIdDesdeUsuario } from '../utils/empresa.js'
+import { logAuditEvent } from '../utils/audit.js'
+import { buildPinFingerprint, generatePin4 } from '../utils/pin.js'
+import { DEFAULT_OPERATIVE_CONFIG, deepMerge, getOperativeConfig, normalizeConfigInput } from '../utils/config.js'
+import { aplicarPoliticaConsumosAlCerrarCaja } from '../utils/operativa-runtime.js'
 
 const loginSchema = z.object({
     email: z.string().email().or(z.string()), // Aceptamos usuario o email
     password: z.string().min(1)
 })
 
+const createStaffSchema = z.object({
+    nombreCompleto: z.string().min(2),
+    rolOperativo: z.enum(['barbero', 'encargado', 'admin']).default('barbero')
+})
+
+const cancelarVentaSchema = z.object({
+    motivo: z.string().max(500).optional()
+})
+
+const actualizarPuntoVentaSchema = z.object({
+    direccion: z.string().max(255).optional(),
+    telefono_contacto: z.string().max(30).optional(),
+})
+
+const operativaScopeSchema = z.object({
+    scope: z.enum(['empresa', 'pv']).default('empresa'),
+    puntoVentaId: z.string().uuid().optional(),
+})
+
+const operativaUpdateSchema = z.object({
+    scope: z.enum(['empresa', 'pv']).default('empresa'),
+    puntoVentaId: z.string().uuid().optional(),
+    config: z.object({
+        pin: z.object({
+            habilitar_limite_intentos: z.boolean().optional(),
+            max_intentos: z.number().int().min(1).max(20).optional(),
+            bloqueo_minutos: z.number().int().min(1).max(120).optional(),
+            mostrar_contador_intentos: z.boolean().optional(),
+        }).optional(),
+        caja: z.object({
+            cierre_automatico_habilitado: z.boolean().optional(),
+            cierre_automatico_hora: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/).nullable().optional(),
+            apertura_modo: z.enum(['manual', 'primera_venta', 'hora_programada']).optional(),
+            apertura_hora: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/).nullable().optional(),
+            apertura_roles_permitidos: z.array(z.string().uuid()).optional(),
+            accion_caja_cerrada: z.enum(['preguntar', 'fuera_caja', 'bloquear']).optional(),
+        }).optional(),
+        consumos: z.object({
+            al_cierre_sin_liquidar: z.enum([
+                'pendiente_siguiente_caja',
+                'cobro_automatico_venta',
+                'cobro_automatico_costo',
+                'perdonado',
+            ]).optional(),
+        }).optional(),
+    })
+})
+
 const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
+    const resolveRoleId = async (empresaId: string, rolOperativo: 'barbero' | 'encargado' | 'admin') => {
+        const roleCandidates =
+            rolOperativo === 'admin'
+                ? ['admin']
+                : rolOperativo === 'encargado'
+                    ? ['encargado', 'manager', 'barber']
+                    : ['barber', 'staff']
+
+        const roles = await sqlAdmin`
+            SELECT id, nombre
+            FROM roles
+            WHERE (empresa_id = ${empresaId} OR empresa_id IS NULL)
+            AND nombre = ANY(${roleCandidates})
+            ORDER BY
+                CASE WHEN empresa_id = ${empresaId} THEN 0 ELSE 1 END,
+                CASE WHEN nombre = ${roleCandidates[0]} THEN 0 ELSE 1 END
+            LIMIT 1
+        `
+
+        if (roles.length > 0) {
+            return roles[0].id as string
+        }
+
+        const fallback = await sqlAdmin`
+            SELECT id FROM roles
+            WHERE (empresa_id = ${empresaId} OR empresa_id IS NULL)
+            ORDER BY CASE WHEN empresa_id = ${empresaId} THEN 0 ELSE 1 END, nombre ASC
+            LIMIT 1
+        `
+
+        if (fallback.length === 0) {
+            throw new Error('No hay roles configurados para la empresa')
+        }
+
+        return fallback[0].id as string
+    }
+
+    const generateUniquePin = async (empresaId: string): Promise<string> => {
+        for (let i = 0; i < 10000; i += 1) {
+            const candidate = generatePin4()
+            const fingerprint = buildPinFingerprint(empresaId, candidate)
+            const existing = await sqlAdmin`
+                SELECT id
+                FROM usuarios
+                WHERE empresa_id = ${empresaId}
+                AND pin_fingerprint = ${fingerprint}
+                AND activo = true
+                LIMIT 1
+            `
+
+            if (existing.length === 0) {
+                return candidate
+            }
+        }
+
+        throw new Error('No se pudo generar un PIN único para la empresa')
+    }
+
 
     // Login Admin
     fastify.post('/admin/login', async (request, reply) => {
@@ -18,7 +129,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             console.log('🔐 Admin login attempt:', email);
 
             // Buscar usuario por email o nombre de usuario
-            const usuarios = await sql`
+            const usuarios = await sqlAdmin`
                 SELECT id, nombre_completo as nombre, correo, password_hash, rol_id, activo 
                 FROM usuarios 
                 WHERE correo = ${email} OR usuario = ${email}
@@ -51,8 +162,17 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             const session = await authService.createSession(usuario.id)
             console.log('✅ Sesión creada:', session.token);
 
+            await logAuditEvent({
+                empresaId: await getDefaultEmpresaId(),
+                usuarioId: usuario.id,
+                accion: 'admin_login',
+                entidad: 'sesion_admin',
+                metadata: { email },
+                request
+            })
+
             // Obtener info del rol
-            const roles = await sql`SELECT nombre FROM roles WHERE id = ${usuario.rol_id}`
+            const roles = await sqlAdmin`SELECT nombre FROM roles WHERE id = ${usuario.rol_id}`
             const rolNombre = roles.length > 0 ? roles[0].nombre : 'unknown'
 
             return {
@@ -79,9 +199,50 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
     fastify.post('/admin/logout', async (request, reply) => {
         const token = request.headers.authorization?.replace('Bearer ', '')
         if (token) {
+            const session = await authService.verifySession(token)
             await authService.logout(token)
+            await logAuditEvent({
+                empresaId: await getDefaultEmpresaId(),
+                usuarioId: session?.usuario_id ?? null,
+                accion: 'admin_logout',
+                entidad: 'sesion_admin',
+                metadata: {},
+                request
+            })
         }
         return { success: true }
+    })
+
+    fastify.get('/admin/roles', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+        const roles = await sqlAdmin`
+            SELECT id, nombre, descripcion, empresa_id
+            FROM roles
+            WHERE empresa_id = ${empresaId} OR empresa_id IS NULL
+            ORDER BY
+                CASE WHEN empresa_id = ${empresaId} THEN 0 ELSE 1 END,
+                lower(nombre) ASC
+        `
+
+        const vistos = new Set<string>()
+        const deduplicados = roles.filter((rol) => {
+            const clave = String(rol.nombre || '').trim().toLowerCase()
+            if (!clave || vistos.has(clave)) return false
+            vistos.add(clave)
+            return true
+        })
+
+        return deduplicados
     })
 
     // Verificar Sesión (Me)
@@ -105,6 +266,283 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             nombre: session.nombre,
             email: session.correo,
             rol: session.rol_nombre
+        }
+    })
+
+    fastify.post('/admin/staff', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const { nombreCompleto, rolOperativo } = createStaffSchema.parse(request.body)
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            const roleId = await resolveRoleId(empresaId, rolOperativo)
+
+            const pin = await generateUniquePin(empresaId)
+            const pinFingerprint = buildPinFingerprint(empresaId, pin)
+            const pinHash = await authService.hashPassword(pin)
+
+            const [usuario] = await sqlAdmin`
+                INSERT INTO usuarios (
+                    nombre_completo,
+                    activo,
+                    intentos_fallidos,
+                    rol_id,
+                    empresa_id,
+                    password_hash,
+                    pin_hash,
+                    pin_fingerprint,
+                    creado_en,
+                    actualizado_en
+                )
+                VALUES (
+                    ${nombreCompleto},
+                    true,
+                    0,
+                    ${roleId},
+                    ${empresaId},
+                    '',
+                    ${pinHash},
+                    ${pinFingerprint},
+                    NOW(),
+                    NOW()
+                )
+                RETURNING id, nombre_completo
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'staff_creado',
+                entidad: 'usuario',
+                entidadId: usuario.id,
+                metadata: { rolOperativo, nombreCompleto },
+                request
+            })
+
+            return {
+                id: usuario.id,
+                nombreCompleto: usuario.nombre_completo,
+                rolOperativo,
+                pin
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    // Admin: Listar puntos de venta para mantenimiento
+    fastify.get('/admin/puntos-venta', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            const puntosVenta = await sql`
+                SELECT id, nombre, codigo, direccion, telefono_contacto, activo, creado_en, actualizado_en
+                FROM puntos_venta
+                WHERE empresa_id = ${empresaId}
+                ORDER BY nombre ASC
+            `
+
+            return puntosVenta
+        } catch (err) {
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    // Admin: Actualizar datos de contacto del punto de venta
+    fastify.put('/admin/puntos-venta/:id', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const { id } = request.params as { id: string }
+            const payload = actualizarPuntoVentaSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const direccion = payload.direccion?.trim() || null
+            const telefono = payload.telefono_contacto?.trim() || null
+
+            const updated = await sql`
+                UPDATE puntos_venta
+                SET direccion = ${direccion},
+                    telefono_contacto = ${telefono},
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                AND empresa_id = ${empresaId}
+                RETURNING id, nombre, codigo, direccion, telefono_contacto, activo, actualizado_en
+            `
+
+            if (updated.length === 0) {
+                return reply.code(404).send({ error: 'Punto de venta no encontrado' })
+            }
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'punto_venta_actualizado',
+                entidad: 'punto_venta',
+                entidadId: id,
+                metadata: {
+                    direccion,
+                    telefono_contacto: telefono,
+                },
+                request
+            })
+
+            return updated[0]
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.get('/admin/configuracion-operativa', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { scope, puntoVentaId } = operativaScopeSchema.parse(request.query ?? {})
+            if (scope === 'pv' && !puntoVentaId) {
+                return reply.code(400).send({ error: 'puntoVentaId es requerido para scope pv' })
+            }
+
+            const empresaId = await getDefaultEmpresaId()
+            const effective = await getOperativeConfig(empresaId, scope === 'pv' ? puntoVentaId : null)
+
+            const wherePv = scope === 'pv' ? puntoVentaId : null
+            const current = await sql`
+                SELECT id, config, actualizado_en
+                FROM configuraciones_operativas
+                WHERE empresa_id = ${empresaId}
+                AND ${wherePv ? sql`punto_venta_id = ${wherePv}` : sql`punto_venta_id IS NULL`}
+                LIMIT 1
+            `
+
+            return {
+                scope,
+                puntoVentaId: wherePv,
+                config_guardada: normalizeConfigInput(current[0]?.config),
+                config_efectiva: effective,
+                defaults: DEFAULT_OPERATIVE_CONFIG,
+                actualizado_en: current[0]?.actualizado_en ?? null,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.put('/admin/configuracion-operativa', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { scope, puntoVentaId, config } = operativaUpdateSchema.parse(request.body ?? {})
+            if (scope === 'pv' && !puntoVentaId) {
+                return reply.code(400).send({ error: 'puntoVentaId es requerido para scope pv' })
+            }
+
+            const empresaId = await getDefaultEmpresaId()
+            const wherePv = scope === 'pv' ? puntoVentaId : null
+
+            const existing = await sql`
+                SELECT id, config
+                FROM configuraciones_operativas
+                WHERE empresa_id = ${empresaId}
+                AND ${wherePv ? sql`punto_venta_id = ${wherePv}` : sql`punto_venta_id IS NULL`}
+                LIMIT 1
+            `
+
+            const merged = deepMerge(normalizeConfigInput(existing[0]?.config), config)
+
+            let row
+            if (existing.length > 0) {
+                const updated = await sql`
+                    UPDATE configuraciones_operativas
+                    SET config = ${JSON.stringify(merged)}::jsonb,
+                        actualizado_en = NOW()
+                    WHERE id = ${existing[0].id}
+                    RETURNING id, empresa_id, punto_venta_id, config, actualizado_en
+                `
+                row = updated[0]
+            } else {
+                const inserted = await sql`
+                    INSERT INTO configuraciones_operativas (empresa_id, punto_venta_id, config)
+                    VALUES (${empresaId}, ${wherePv ?? null}, ${JSON.stringify(merged)}::jsonb)
+                    RETURNING id, empresa_id, punto_venta_id, config, actualizado_en
+                `
+                row = inserted[0]
+            }
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'configuracion_operativa_actualizada',
+                entidad: 'configuracion_operativa',
+                entidadId: row.id,
+                metadata: {
+                    scope,
+                    puntoVentaId: wherePv ?? null,
+                    patch: config,
+                },
+                request,
+            })
+
+            const effective = await getOperativeConfig(empresaId, wherePv)
+            return {
+                success: true,
+                scope,
+                puntoVentaId: wherePv,
+                config_guardada: normalizeConfigInput(row.config),
+                config_efectiva: effective,
+                actualizado_en: row.actualizado_en,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
         }
     })
     // Dashboard Stats
@@ -206,26 +644,29 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             const staffId = query.staffId
             const fechaDesde = query.fechaDesde
             const fechaHasta = query.fechaHasta
+            const estado = query.estado
             const limit = parseInt(query.limit) || 50
             const offset = parseInt(query.offset) || 0
-
-            let whereConditions = [`t.tipo = 'venta_cliente'`, `t.estado = 'confirmada'`]
 
             const ventas = await sql`
                 SELECT 
                     t.id,
                     t.tipo,
                     t.total,
+                    t.estado,
                     t.medio_pago_nombre,
                     t.creado_en,
                     t.confirmado_en,
+                    t.anulada_en,
+                    t.motivo_anulacion,
+                    t.fuera_caja,
                     pv.nombre as punto_venta,
                     u.nombre_completo as staff
                 FROM transacciones t
                 JOIN puntos_venta pv ON t.punto_venta_id = pv.id
                 LEFT JOIN usuarios u ON t.usuario_id = u.id
                 WHERE t.tipo = 'venta_cliente' 
-                AND t.estado = 'confirmada'
+                ${estado ? sql`AND t.estado = ${estado}` : sql``}
                 ${puntoVentaId ? sql`AND t.punto_venta_id = ${puntoVentaId}` : sql``}
                 ${staffId ? sql`AND t.usuario_id = ${staffId}` : sql``}
                 ${fechaDesde ? sql`AND DATE(t.creado_en) >= ${fechaDesde}` : sql``}
@@ -268,6 +709,9 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     t.estado,
                     t.creado_en,
                     t.confirmado_en,
+                    t.anulada_en,
+                    t.motivo_anulacion,
+                    t.fuera_caja,
                     pv.id as punto_venta_id,
                     pv.nombre as punto_venta_nombre,
                     pv.codigo as punto_venta_codigo,
@@ -307,6 +751,124 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 items: detalles
             }
 
+        } catch (err) {
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    // Admin: Anular venta (libre con log)
+    fastify.post('/admin/transacciones/:id/anular', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const { id } = request.params as { id: string }
+            const { motivo } = cancelarVentaSchema.parse(request.body ?? {})
+            const empresaId = await getDefaultEmpresaId()
+
+            const transacciones = await sql`
+                SELECT id, estado, total, punto_venta_id
+                FROM transacciones
+                WHERE id = ${id}
+                AND empresa_id = ${empresaId}
+                AND tipo = 'venta_cliente'
+                LIMIT 1
+            `
+
+            if (transacciones.length === 0) {
+                return reply.code(404).send({ error: 'Venta no encontrada' })
+            }
+
+            const venta = transacciones[0]
+            if (venta.estado === 'anulada') {
+                return { success: true, alreadyCancelled: true, id }
+            }
+
+            await sql`
+                UPDATE transacciones
+                SET estado = 'anulada',
+                    anulada_en = NOW(),
+                    anulada_por_admin_id = ${session.usuario_id},
+                    motivo_anulacion = ${motivo || null}
+                WHERE id = ${id}
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'venta_anulada',
+                entidad: 'transaccion',
+                entidadId: id,
+                metadata: {
+                    motivo: motivo || null,
+                    total: Number(venta.total),
+                    puntoVentaId: venta.punto_venta_id,
+                },
+                request
+            })
+
+            return { success: true, id }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    // Admin: Auditoria basica
+    fastify.get('/admin/auditoria', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const query = request.query as any
+            const accion = query.accion
+            const fechaDesde = query.fechaDesde
+            const fechaHasta = query.fechaHasta
+            const limit = parseInt(query.limit) || 100
+            const offset = parseInt(query.offset) || 0
+            const empresaId = await getDefaultEmpresaId()
+
+            const eventos = await sql`
+                SELECT
+                    a.id,
+                    a.accion,
+                    a.entidad,
+                    a.entidad_id,
+                    a.metadata,
+                    a.ip,
+                    a.user_agent,
+                    a.creado_en,
+                    u.nombre_completo as usuario_nombre
+                FROM auditoria_eventos a
+                LEFT JOIN usuarios u ON a.usuario_id = u.id
+                WHERE a.empresa_id = ${empresaId}
+                ${accion ? sql`AND a.accion = ${accion}` : sql``}
+                ${fechaDesde ? sql`AND DATE(a.creado_en) >= ${fechaDesde}` : sql``}
+                ${fechaHasta ? sql`AND DATE(a.creado_en) <= ${fechaHasta}` : sql``}
+                ORDER BY a.creado_en DESC
+                LIMIT ${Math.min(limit, 500)}
+                OFFSET ${offset}
+            `
+
+            return eventos
         } catch (err) {
             fastify.log.error(err)
             return reply.code(500).send({ error: 'Error interno de servidor' })
@@ -413,6 +975,16 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 WHERE id = ${cajaId}
             `
 
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'caja_apertura',
+                entidad: 'caja',
+                entidadId: cajaId,
+                metadata: { montoInicial: Number(montoInicial) },
+                request
+            })
+
             return { success: true, message: 'Caja abierta exitosamente' }
 
         } catch (err) {
@@ -434,7 +1006,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         }
 
         try {
-            const { cajaId, montoReal, observaciones } = request.body as any
+            const { cajaId, montoReal, observaciones, incluirFueraCaja = false } = request.body as any
 
             if (!cajaId || montoReal === undefined) {
                 return reply.code(400).send({ error: 'cajaId y montoReal son requeridos' })
@@ -457,6 +1029,18 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return reply.code(400).send({ error: 'La caja no está abierta' })
             }
 
+            const fueraCajaPendientes = await sql`
+                SELECT
+                    COALESCE(SUM(total), 0) as total,
+                    COUNT(*) as cantidad
+                FROM transacciones
+                WHERE punto_venta_id = ${caja.punto_venta_id}
+                AND empresa_id = ${empresaId}
+                AND estado = 'confirmada'
+                AND fuera_caja = true
+                AND conciliada_en IS NULL
+            `
+
             // Calcular totales del día
             const totales = await sql`
                 SELECT 
@@ -473,9 +1057,12 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             `
 
             const montoInicial = Number(caja.monto_inicial_actual)
+            const totalFueraCajaPendiente = Number(fueraCajaPendientes[0].total)
+            const cantidadFueraCajaPendiente = Number(fueraCajaPendientes[0].cantidad)
             const totalEfectivo = Number(totales[0].total_efectivo)
-            const montoEsperado = montoInicial + totalEfectivo
+            const montoEsperado = montoInicial + totalEfectivo + (incluirFueraCaja ? totalFueraCajaPendiente : 0)
             const diferencia = Number(montoReal) - montoEsperado
+            const fechaOperativa = new Date(caja.fecha_apertura_actual ?? new Date()).toISOString().slice(0, 10)
 
             // Crear registro de cierre
             const cierre = await sql`
@@ -484,6 +1071,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     punto_venta_id,
                     empresa_id,
                     cerrada_por_admin_id,
+                    fecha_operativa,
                     fecha_apertura,
                     fecha_cierre,
                     monto_inicial,
@@ -495,13 +1083,17 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     total_tarjeta,
                     total_transferencia,
                     cantidad_transacciones,
-                    observaciones
+                    observaciones,
+                    incluir_fuera_caja,
+                    fuera_caja_incluidas,
+                    total_fuera_caja_conciliado
                 )
                 VALUES (
                     ${cajaId},
                     ${caja.punto_venta_id},
                     ${empresaId},
                     ${session.usuario_id},
+                    ${fechaOperativa},
                     ${caja.fecha_apertura_actual},
                     NOW(),
                     ${montoInicial},
@@ -512,11 +1104,54 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     ${totalEfectivo},
                     ${totales[0].total_tarjeta},
                     ${totales[0].total_transferencia},
-                    ${totales[0].cantidad_transacciones},
-                    ${observaciones || null}
+                    ${Number(totales[0].cantidad_transacciones) + (incluirFueraCaja ? cantidadFueraCajaPendiente : 0)},
+                    ${observaciones || null},
+                    ${incluirFueraCaja},
+                    ${incluirFueraCaja ? cantidadFueraCajaPendiente : 0},
+                    ${incluirFueraCaja ? totalFueraCajaPendiente : 0}
                 )
+                ON CONFLICT (punto_venta_id, caja_id, fecha_operativa)
+                DO UPDATE SET
+                    empresa_id = EXCLUDED.empresa_id,
+                    cerrada_por_admin_id = EXCLUDED.cerrada_por_admin_id,
+                    fecha_apertura = EXCLUDED.fecha_apertura,
+                    fecha_cierre = EXCLUDED.fecha_cierre,
+                    monto_inicial = EXCLUDED.monto_inicial,
+                    monto_esperado = EXCLUDED.monto_esperado,
+                    monto_real = EXCLUDED.monto_real,
+                    diferencia = EXCLUDED.diferencia,
+                    total_ventas = EXCLUDED.total_ventas,
+                    total_efectivo = EXCLUDED.total_efectivo,
+                    total_tarjeta = EXCLUDED.total_tarjeta,
+                    total_transferencia = EXCLUDED.total_transferencia,
+                    cantidad_transacciones = EXCLUDED.cantidad_transacciones,
+                    observaciones = EXCLUDED.observaciones,
+                    incluir_fuera_caja = EXCLUDED.incluir_fuera_caja,
+                    fuera_caja_incluidas = EXCLUDED.fuera_caja_incluidas,
+                    total_fuera_caja_conciliado = EXCLUDED.total_fuera_caja_conciliado
                 RETURNING id
             `
+
+            if (incluirFueraCaja && cantidadFueraCajaPendiente > 0) {
+                await sql`
+                    UPDATE transacciones
+                    SET conciliada_en_cierre_id = ${cierre[0].id},
+                        conciliada_en = NOW()
+                    WHERE punto_venta_id = ${caja.punto_venta_id}
+                    AND empresa_id = ${empresaId}
+                    AND estado = 'confirmada'
+                    AND fuera_caja = true
+                    AND conciliada_en IS NULL
+                `
+            }
+
+            const resultadoConsumos = await aplicarPoliticaConsumosAlCerrarCaja({
+                empresaId,
+                puntoVentaId: caja.punto_venta_id,
+                cierreId: cierre[0].id,
+                usuarioId: session.usuario_id,
+                request,
+            })
 
             // Cerrar caja
             await sql`
@@ -528,10 +1163,31 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 WHERE id = ${cajaId}
             `
 
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'caja_cierre',
+                entidad: 'caja',
+                entidadId: cajaId,
+                metadata: {
+                    cierreId: cierre[0].id,
+                    montoReal: Number(montoReal),
+                    montoEsperado,
+                    diferencia,
+                    incluirFueraCaja,
+                    fueraCajaConciliadas: incluirFueraCaja ? cantidadFueraCajaPendiente : 0,
+                    consumosAplicados: resultadoConsumos,
+                },
+                request
+            })
+
             return {
                 success: true,
                 cierreId: cierre[0].id,
-                diferencia: diferencia
+                diferencia: diferencia,
+                fueraCajaConciliadas: incluirFueraCaja ? cantidadFueraCajaPendiente : 0,
+                totalFueraCajaConciliado: incluirFueraCaja ? totalFueraCajaPendiente : 0,
+                consumosAplicados: resultadoConsumos,
             }
 
         } catch (err) {
@@ -596,6 +1252,18 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             const totalEfectivo = Number(totales[0].total_efectivo)
             const montoEsperado = montoInicial + totalEfectivo
 
+            const fueraCajaPendientes = await sql`
+                SELECT
+                    COALESCE(SUM(total), 0) as total,
+                    COUNT(*) as cantidad
+                FROM transacciones
+                WHERE punto_venta_id = ${caja.punto_venta_id}
+                AND empresa_id = ${empresaId}
+                AND estado = 'confirmada'
+                AND fuera_caja = true
+                AND conciliada_en IS NULL
+            `
+
             return {
                 abierta: true,
                 montoInicial: montoInicial,
@@ -604,7 +1272,9 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 totalEfectivo: totalEfectivo,
                 totalTarjeta: Number(totales[0].total_tarjeta),
                 totalTransferencia: Number(totales[0].total_transferencia),
-                montoEsperado: montoEsperado
+                montoEsperado: montoEsperado,
+                fueraCajaPendientesCantidad: Number(fueraCajaPendientes[0].cantidad),
+                fueraCajaPendientesTotal: Number(fueraCajaPendientes[0].total)
             }
 
         } catch (err) {

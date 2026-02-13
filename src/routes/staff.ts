@@ -1,6 +1,10 @@
 import { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
-import sql from '../db.js'
+import sql from '../db-admin.js'
+import { authService } from '../services/auth.js'
+import { buildPinFingerprint, isBcryptHash } from '../utils/pin.js'
+import { getEmpresaIdFromRequest } from '../utils/empresa.js'
+import { getOperativeConfig } from '../utils/config.js'
 
 const validarPinSchema = z.object({
     pin: z.string().length(4),
@@ -8,14 +12,27 @@ const validarPinSchema = z.object({
 })
 
 const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
+    const verifyPin = async (pin: string, pinHash: string | null | undefined): Promise<boolean> => {
+        if (!pinHash) return false
+        if (isBcryptHash(pinHash)) {
+            return authService.verifyPassword(pin, pinHash)
+        }
+        return pinHash === pin
+    }
+
     // Listar todo el staff (público por ahora, luego admin)
     fastify.get('/staff', async (request, reply) => {
         try {
-            const staff = await sql`
-                SELECT id, nombre_completo as nombre, 'barber' as rol, bloqueado_hasta
+                const staff = await sql`
+                SELECT
+                    u.id,
+                    u.nombre_completo as nombre,
+                    COALESCE(lower(r.nombre), 'vendedor') as rol,
+                    u.bloqueado_hasta
                 FROM usuarios
-                WHERE activo = true
-                ORDER BY nombre_completo ASC
+                LEFT JOIN roles r ON r.id = u.rol_id
+                WHERE u.activo = true
+                ORDER BY u.nombre_completo ASC
             `
             return staff
         } catch (err) {
@@ -24,22 +41,7 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
         }
     })
 
-    // Rate limit por IP + staffId para frenar bots y ataques distribuidos
-    fastify.post('/staff/validar-pin', {
-        config: {
-            rateLimit: {
-                max: 5,
-                timeWindow: '1 minute',
-                // Combinar IP + staffId para rate limit más granular
-                keyGenerator: (request) => {
-                    const body = request.body as { staffId?: string }
-                    const ip = request.ip
-                    const staffId = body?.staffId || 'unknown'
-                    return `${ip}-${staffId}`
-                }
-            }
-        }
-    }, async (request, reply) => {
+    fastify.post('/staff/validar-pin', async (request, reply) => {
         try {
             const { pin, staffId } = validarPinSchema.parse(request.body)
 
@@ -48,29 +50,88 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
             // pin_hash -> pin, nombre_completo -> nombre
             // Asumimos rol = 'barber' por defecto ya que no existe columna rol
             let staff;
+            const empresaId = await getEmpresaIdFromRequest(request)
+
+            const config = await getOperativeConfig(empresaId)
+            const pinProtectionEnabled = config.pin.habilitar_limite_intentos
+            const maxIntentos = Math.max(1, Number(config.pin.max_intentos || 5))
+            const bloqueoMinutos = Math.max(1, Number(config.pin.bloqueo_minutos || 15))
 
             if (staffId) {
                 const staffData = await sql`
-                    SELECT id, nombre_completo as nombre, 'barber' as rol, password_hash as pin, bloqueado_hasta, intentos_fallidos
-                    FROM usuarios 
-                    WHERE id = ${staffId}
+                    SELECT
+                        u.id,
+                        u.nombre_completo as nombre,
+                        COALESCE(lower(r.nombre), 'vendedor') as rol,
+                        u.rol_id,
+                        u.pin_hash as pin_hash,
+                        u.bloqueado_hasta,
+                        u.intentos_fallidos
+                    FROM usuarios u
+                    LEFT JOIN roles r ON r.id = u.rol_id
+                    WHERE u.id = ${staffId}
+                    AND u.empresa_id = ${empresaId}
                 `
                 if (staffData.length === 0) return reply.code(404).send({ error: 'Staff no encontrado' })
                 staff = staffData[0]
             } else {
-                const staffData = await sql`
-                    SELECT id, nombre_completo as nombre, 'barber' as rol, password_hash as pin, bloqueado_hasta, intentos_fallidos
-                    FROM usuarios 
-                    WHERE password_hash = ${pin}
+                const fingerprint = buildPinFingerprint(empresaId, pin)
+                const byFingerprint = await sql`
+                    SELECT
+                        u.id,
+                        u.nombre_completo as nombre,
+                        COALESCE(lower(r.nombre), 'vendedor') as rol,
+                        u.rol_id,
+                        u.pin_hash as pin_hash,
+                        u.bloqueado_hasta,
+                        u.intentos_fallidos
+                    FROM usuarios u
+                    LEFT JOIN roles r ON r.id = u.rol_id
+                    WHERE u.empresa_id = ${empresaId}
+                    AND u.pin_fingerprint = ${fingerprint}
+                    AND u.activo = true
+                    LIMIT 1
                 `
-                if (staffData.length === 0) {
-                    return reply.code(401).send({ error: 'PIN incorrecto' })
+
+                if (byFingerprint.length > 0) {
+                    staff = byFingerprint[0]
+                } else {
+                    // Fallback para usuarios legacy sin fingerprint
+                    const legacyCandidates = await sql`
+                        SELECT
+                            u.id,
+                            u.nombre_completo as nombre,
+                            COALESCE(lower(r.nombre), 'vendedor') as rol,
+                            u.rol_id,
+                            u.pin_hash as pin_hash,
+                            u.bloqueado_hasta,
+                            u.intentos_fallidos
+                        FROM usuarios u
+                        LEFT JOIN roles r ON r.id = u.rol_id
+                        WHERE u.empresa_id = ${empresaId}
+                        AND u.pin_hash IS NOT NULL
+                        AND u.activo = true
+                    `
+
+                    let matched: any = null
+                    for (const candidate of legacyCandidates) {
+                        const valid = await verifyPin(pin, candidate.pin_hash)
+                        if (valid) {
+                            matched = candidate
+                            break
+                        }
+                    }
+
+                    if (!matched) {
+                        return reply.code(401).send({ error: 'PIN incorrecto' })
+                    }
+
+                    staff = matched
                 }
-                staff = staffData[0]
             }
 
             // Verificar si está bloqueado
-            if (staff.bloqueado_hasta && new Date(staff.bloqueado_hasta) > new Date()) {
+            if (pinProtectionEnabled && staff.bloqueado_hasta && new Date(staff.bloqueado_hasta) > new Date()) {
                 return reply.code(403).send({
                     error: 'Cuenta bloqueada',
                     bloqueado_hasta: staff.bloqueado_hasta
@@ -78,15 +139,19 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
             }
 
             // Validar PIN (comparación directa para texto plano)
-            if (staff.pin !== pin) {
-                // UPDATE ATÓMICO
-                // Usamos intentos_pin_fallidos (confirmado por debug script)
+            const isPinValid = await verifyPin(pin, staff.pin_hash)
+            if (!isPinValid) {
+                if (!pinProtectionEnabled) {
+                    return reply.code(401).send({ error: 'PIN incorrecto' })
+                }
+
+                const bloqueoInterval = `${bloqueoMinutos} minutes`
                 const updateResult = await sql`
                     UPDATE usuarios 
                     SET intentos_fallidos = intentos_fallidos + 1,
                         bloqueado_hasta = CASE 
-                            WHEN intentos_fallidos + 1 >= 5 
-                            THEN NOW() + INTERVAL '15 minutes'
+                            WHEN intentos_fallidos + 1 >= ${maxIntentos} 
+                            THEN NOW() + (${bloqueoInterval})::interval
                             ELSE bloqueado_hasta
                         END
                     WHERE id = ${staff.id}
@@ -96,7 +161,7 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 const nuevosIntentos = updateResult[0].intentos_fallidos
                 const bloqueado = updateResult[0].bloqueado_hasta
 
-                if (bloqueado && nuevosIntentos >= 5) {
+                if (bloqueado && nuevosIntentos >= maxIntentos) {
                     return reply.code(403).send({
                         error: 'Cuenta bloqueada por múltiples intentos fallidos',
                         bloqueado_hasta: bloqueado
@@ -105,22 +170,25 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
                 return reply.code(401).send({
                     error: 'PIN incorrecto',
-                    intentos_restantes: Math.max(0, 5 - nuevosIntentos)
+                    intentos_restantes: Math.max(0, maxIntentos - nuevosIntentos)
                 })
             }
 
             // PIN correcto - resetear intentos
-            await sql`
-                UPDATE usuarios 
-                SET intentos_fallidos = 0,
-                    bloqueado_hasta = NULL
-                WHERE id = ${staff.id}
-            `
+            if (pinProtectionEnabled) {
+                await sql`
+                    UPDATE usuarios 
+                    SET intentos_fallidos = 0,
+                        bloqueado_hasta = NULL
+                    WHERE id = ${staff.id}
+                `
+            }
 
             return {
                 id: staff.id,
                 nombre: staff.nombre,
-                rol: staff.rol
+                rol: staff.rol,
+                rolId: staff.rol_id || null,
             }
 
         } catch (err) {

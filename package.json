@@ -6,7 +6,13 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "npx tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "setup:db-role": "tsx src/scripts/setup-app-db-role.ts",
+    "migrate:020": "tsx src/scripts/migrate-020.ts",
+    "migrate:021": "tsx src/scripts/migrate-021.ts",
+    "qa:smoke": "tsx src/scripts/qa-smoke.ts",
+    "qa:rls": "tsx src/scripts/qa-rls.ts",
+    "qa:regression": "npm run build && npm run qa:smoke"
   },
   "keywords": [],
   "author": "",

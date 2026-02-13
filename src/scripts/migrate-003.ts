@@ -1,4 +1,4 @@
-import sql from '../db.js';
+import sql from '../db-admin.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';

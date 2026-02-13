@@ -1,11 +1,16 @@
 import { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
-import sql from '../db.js'
+import sql from '../db-admin.js'
+import { getEmpresaIdFromRequest, obtenerEmpresaIdPorPuntoVenta } from '../utils/empresa.js'
+import { logAuditEvent } from '../utils/audit.js'
+import { procesarOperativaCajaEnMovimiento } from '../utils/operativa-runtime.js'
+import { authService } from '../services/auth.js'
 
 // Schemas de validación
 const registrarConsumoSchema = z.object({
     staffId: z.string().uuid(),
     puntoVentaId: z.string().uuid(),
+    accionCajaCerrada: z.enum(['abrir', 'fuera_caja']).optional(),
     items: z.array(z.object({
         tipo: z.enum(['servicio', 'producto']),
         itemId: z.string().uuid(),
@@ -25,12 +30,34 @@ const liquidarConsumosSchema = z.object({
     motivo: z.string().optional()
 })
 
+const cancelarRapidoConsumoSchema = z.object({
+    staffId: z.string().uuid(),
+    puntoVentaId: z.string().uuid(),
+})
+
 const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
     // Registrar consumo del staff
     fastify.post('/consumos/registrar', async (request, reply) => {
         try {
             console.log('📦 Registrando consumo, body:', JSON.stringify(request.body, null, 2));
-            const { staffId, puntoVentaId, items } = registrarConsumoSchema.parse(request.body)
+            const { staffId, puntoVentaId, accionCajaCerrada, items } = registrarConsumoSchema.parse(request.body)
+
+            const resultadoCaja = await procesarOperativaCajaEnMovimiento({
+                puntoVentaId,
+                usuarioId: staffId,
+                request,
+                motivo: 'registro_consumo_staff',
+                accionCajaCerrada,
+            })
+
+            if (resultadoCaja.requiereDecisionCajaCerrada) {
+                return reply.code(409).send({
+                    error: 'CAJA_CERRADA_REQUIERE_DECISION',
+                    mensaje: resultadoCaja.mensajeDecision,
+                    puedeAbrirCaja: resultadoCaja.puedeAbrirCaja,
+                    accionSugerida: resultadoCaja.accionSugerida,
+                })
+            }
 
             // Calcular totales
             const totalVenta = items.reduce((sum, item) => sum + item.subtotalVenta, 0)
@@ -170,19 +197,38 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
         try {
             const { consumoIds, reglaAplicada, valorRegla, motivo } = liquidarConsumosSchema.parse(request.body)
 
-            // TODO: Validar permisos de admin (cuando tengamos autenticación admin)
-            const adminId = null // Por ahora null, luego será el ID del admin autenticado
+            const token = request.headers.authorization?.replace('Bearer ', '')
+            const sesionAdmin = token ? await authService.verifySession(token) : null
+            const adminId = sesionAdmin?.usuario_id ?? null
 
             // Obtener consumos
             const consumos = await sql`
-                SELECT id, total_venta, total_costo
-                FROM consumos_staff
-                WHERE id = ANY(${consumoIds})
-                AND estado_liquidacion = 'pendiente'
+                SELECT
+                    c.id,
+                    c.usuario_id,
+                    c.punto_venta_id,
+                    c.total_venta,
+                    c.total_costo,
+                    pv.empresa_id
+                FROM consumos_staff c
+                JOIN puntos_venta pv ON pv.id = c.punto_venta_id
+                WHERE c.id = ANY(${consumoIds})
+                AND c.estado_liquidacion = 'pendiente'
             `
 
+            const idsPendientes = consumos.map((c) => c.id)
+            const setPendientes = new Set(idsPendientes)
+            const idsOmitidos = consumoIds.filter((id) => !setPendientes.has(id))
+
             if (consumos.length === 0) {
-                return reply.code(404).send({ error: 'No se encontraron consumos pendientes' })
+                return {
+                    success: true,
+                    liquidados: 0,
+                    omitidos: consumoIds.length,
+                    idsOmitidos: consumoIds,
+                    montoCobradoTotal: 0,
+                    mensaje: 'No se encontraron consumos pendientes para liquidar'
+                }
             }
 
             // Calcular monto cobrado según regla
@@ -211,12 +257,63 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
                 return {
                     consumoId: consumo.id,
-                    montoCobrado
+                    montoCobrado,
+                    usuarioId: consumo.usuario_id,
+                    puntoVentaId: consumo.punto_venta_id,
+                    empresaId: consumo.empresa_id,
                 }
             })
 
+            const obtenerCajaActivaPorPuntoVenta = async (tx: any, empresaId: string, puntoVentaId: string) => {
+                const cajas = await tx`
+                    SELECT id, abierta
+                    FROM cajas
+                    WHERE punto_venta_id = ${puntoVentaId}
+                      AND empresa_id = ${empresaId}
+                      AND activa = true
+                    ORDER BY creado_en ASC
+                    LIMIT 1
+                `
+
+                if (cajas.length > 0) {
+                    return { id: cajas[0].id as string, abierta: Boolean(cajas[0].abierta) }
+                }
+
+                const nuevas = await tx`
+                    INSERT INTO cajas (punto_venta_id, empresa_id, nombre, es_virtual, activa)
+                    VALUES (${puntoVentaId}, ${empresaId}, 'Caja Virtual (Auto)', true, true)
+                    RETURNING id, abierta
+                `
+
+                return { id: nuevas[0].id as string, abierta: Boolean(nuevas[0].abierta) }
+            }
+
+            const obtenerMedioPagoEfectivo = async (tx: any, empresaId: string) => {
+                const medios = await tx`
+                    SELECT id, nombre
+                    FROM medios_pago
+                    WHERE nombre ILIKE 'efectivo'
+                      AND (empresa_id = ${empresaId} OR empresa_id IS NULL)
+                    ORDER BY CASE WHEN empresa_id = ${empresaId} THEN 0 ELSE 1 END, creado_en ASC
+                    LIMIT 1
+                `
+
+                if (medios.length > 0) {
+                    return { id: medios[0].id as string, nombre: String(medios[0].nombre || 'efectivo') }
+                }
+
+                return { id: null as string | null, nombre: 'efectivo' }
+            }
+
+            let transaccionesGeneradas = 0
+            let montoEnCaja = 0
+            let montoFueraCaja = 0
+
             // Crear liquidaciones y actualizar consumos en transacción
             await sql.begin(async (txn: any) => {
+                const cacheCaja = new Map<string, { id: string; abierta: boolean }>()
+                const cacheMedioPago = new Map<string, { id: string | null; nombre: string }>()
+
                 // Crear registros de liquidación
                 for (const liq of liquidaciones) {
                     await txn`
@@ -239,6 +336,61 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                             NOW()
                         )
                     `
+
+                    if (Number(liq.montoCobrado) > 0) {
+                        const claveCaja = `${liq.empresaId}:${liq.puntoVentaId}`
+                        let cajaInfo = cacheCaja.get(claveCaja)
+                        if (!cajaInfo) {
+                            cajaInfo = await obtenerCajaActivaPorPuntoVenta(txn, liq.empresaId, liq.puntoVentaId)
+                            cacheCaja.set(claveCaja, cajaInfo)
+                        }
+
+                        let medio = cacheMedioPago.get(liq.empresaId)
+                        if (!medio) {
+                            medio = await obtenerMedioPagoEfectivo(txn, liq.empresaId)
+                            cacheMedioPago.set(liq.empresaId, medio)
+                        }
+
+                        const fueraCaja = !cajaInfo.abierta
+
+                        await txn`
+                            INSERT INTO transacciones (
+                                tipo,
+                                punto_venta_id,
+                                caja_id,
+                                usuario_id,
+                                empresa_id,
+                                estado,
+                                subtotal,
+                                total,
+                                medio_pago_id,
+                                medio_pago_nombre,
+                                fuera_caja,
+                                confirmado_en
+                            )
+                            VALUES (
+                                'consumo_staff',
+                                ${liq.puntoVentaId},
+                                ${cajaInfo.id},
+                                ${liq.usuarioId},
+                                ${liq.empresaId},
+                                'confirmada',
+                                ${liq.montoCobrado},
+                                ${liq.montoCobrado},
+                                ${medio.id},
+                                ${medio.nombre},
+                                ${fueraCaja},
+                                NOW()
+                            )
+                        `
+
+                        transaccionesGeneradas += 1
+                        if (fueraCaja) {
+                            montoFueraCaja += Number(liq.montoCobrado)
+                        } else {
+                            montoEnCaja += Number(liq.montoCobrado)
+                        }
+                    }
                 }
 
                 // Actualizar estado de consumos
@@ -250,15 +402,38 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     UPDATE consumos_staff
                     SET estado_liquidacion = ${nuevoEstado},
                         liquidado_en = NOW()
-                    WHERE id = ANY(${consumoIds})
+                    WHERE id = ANY(${idsPendientes})
                 `
+            })
+
+            await logAuditEvent({
+                empresaId: liquidaciones[0]?.empresaId || await getEmpresaIdFromRequest(request),
+                accion: 'consumo_liquidado',
+                entidad: 'consumo_staff',
+                metadata: {
+                    consumoIds,
+                    idsPendientes,
+                    idsOmitidos,
+                    reglaAplicada,
+                    valorRegla: valorRegla ?? null,
+                    montoCobradoTotal: liquidaciones.reduce((sum, l) => sum + l.montoCobrado, 0),
+                    transaccionesGeneradas,
+                    montoEnCaja,
+                    montoFueraCaja,
+                },
+                request
             })
 
             return {
                 success: true,
                 liquidados: liquidaciones.length,
+                omitidos: idsOmitidos.length,
+                idsOmitidos,
                 reglaAplicada,
-                montoCobradoTotal: liquidaciones.reduce((sum, l) => sum + l.montoCobrado, 0)
+                montoCobradoTotal: liquidaciones.reduce((sum, l) => sum + l.montoCobrado, 0),
+                transaccionesGeneradas,
+                montoEnCaja,
+                montoFueraCaja,
             }
         } catch (err) {
             if (err instanceof z.ZodError) {
@@ -334,6 +509,76 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 } : null
             }))
         } catch (err) {
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Internal Server Error' })
+        }
+    })
+
+    // Cancelacion rapida de consumo (ventana corta, mismo staff y PV)
+    fastify.post('/consumos/:id/cancelar-rapido', async (request, reply) => {
+        try {
+            const { id } = request.params as { id: string }
+            const { staffId, puntoVentaId } = cancelarRapidoConsumoSchema.parse(request.body)
+            const empresaId = await obtenerEmpresaIdPorPuntoVenta(puntoVentaId)
+
+            const consumos = await sql`
+                SELECT c.id, c.usuario_id, c.punto_venta_id, c.creado_en, c.total_venta, c.estado_liquidacion
+                FROM consumos_staff c
+                JOIN puntos_venta pv ON pv.id = c.punto_venta_id
+                WHERE c.id = ${id}
+                AND pv.empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (consumos.length === 0) {
+                return reply.code(404).send({ error: 'Consumo no encontrado' })
+            }
+
+            const consumo = consumos[0]
+
+            if (consumo.usuario_id !== staffId || consumo.punto_venta_id !== puntoVentaId) {
+                return reply.code(403).send({ error: 'No permitido para este consumo' })
+            }
+
+            if (consumo.estado_liquidacion !== 'pendiente') {
+                return reply.code(400).send({ error: 'Este consumo ya no se puede cancelar' })
+            }
+
+            const createdAt = consumo.creado_en ? new Date(consumo.creado_en).getTime() : 0
+            const diffMs = Date.now() - createdAt
+            if (!createdAt || diffMs > 5000) {
+                return reply.code(400).send({ error: 'Ventana de cancelación expirada' })
+            }
+
+            await sql`
+                DELETE FROM consumos_staff
+                WHERE id = ${id}
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: staffId,
+                accion: 'consumo_cancelado_rapido',
+                entidad: 'consumo_staff',
+                entidadId: id,
+                metadata: {
+                    puntoVentaId,
+                    totalVenta: Number(consumo.total_venta),
+                },
+                request
+            })
+
+            return { success: true, consumoId: id }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Validation Error', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'CAJA_CERRADA_BLOQUEADA') {
+                return reply.code(409).send({
+                    error: 'CAJA_CERRADA_BLOQUEADA',
+                    mensaje: (err as Error).message,
+                })
+            }
             fastify.log.error(err)
             return reply.code(500).send({ error: 'Internal Server Error' })
         }

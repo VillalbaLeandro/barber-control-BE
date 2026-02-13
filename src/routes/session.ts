@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
-import sql from '../db.js'
+import sql from '../db-admin.js'
 
 const setPuntoVentaSchema = z.object({
     staffId: z.string().uuid(),
@@ -27,7 +27,7 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             // Verificar que el punto de venta existe y está activo
             const puntoVenta = await sql`
-                SELECT id, nombre, codigo, activo 
+                SELECT id, nombre, codigo, direccion, telefono_contacto, activo 
                 FROM puntos_venta 
                 WHERE id = ${puntoVentaId}
             `
@@ -66,7 +66,9 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     staffRol: staff[0].rol,
                     puntoVentaId: puntoVenta[0].id,
                     puntoVentaNombre: puntoVenta[0].nombre,
-                    puntoVentaCodigo: puntoVenta[0].codigo
+                    puntoVentaCodigo: puntoVenta[0].codigo,
+                    puntoVentaDireccion: puntoVenta[0].direccion,
+                    puntoVentaTelefono: puntoVenta[0].telefono_contacto
                 }
             }
         } catch (err) {
@@ -109,6 +111,7 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
             const sesion = await sql`
                 SELECT s.usuario_id, st.nombre_completo as staff_nombre, 'barber' as staff_rol,
                        s.punto_venta_id, pv.nombre as punto_venta_nombre, pv.codigo as punto_venta_codigo,
+                       pv.direccion as punto_venta_direccion, pv.telefono_contacto as punto_venta_telefono,
                        s.inicio_sesion
                 FROM sesiones s
                 JOIN usuarios st ON s.usuario_id = st.id
@@ -129,6 +132,8 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 puntoVentaId: sesion[0].punto_venta_id,
                 puntoVentaNombre: sesion[0].punto_venta_nombre,
                 puntoVentaCodigo: sesion[0].punto_venta_codigo,
+                puntoVentaDireccion: sesion[0].punto_venta_direccion,
+                puntoVentaTelefono: sesion[0].punto_venta_telefono,
                 inicioSesion: sesion[0].inicio_sesion
             }
         } catch (err) {

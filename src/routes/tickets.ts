@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
-import sql from '../db.js'
+import sql from '../db-admin.js'
 
 // Schemas de validación
 const crearTicketSchema = z.object({
@@ -86,79 +86,76 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
         try {
             const { id } = request.params as { id: string }
             const itemData = agregarItemSchema.parse(request.body)
+            const ticketActualizado = await sql.begin(async (tx: any) => {
+                const ticketActual = await tx`
+                    SELECT items, total FROM tickets WHERE id = ${id} FOR UPDATE
+                `
 
-            // Obtener ticket actual
-            const ticketActual = await sql`
-                SELECT items, total FROM tickets WHERE id = ${id}
-            `
-
-            if (ticketActual.length === 0) {
-                return reply.code(404).send({ error: 'Ticket no encontrado' })
-            }
-
-            // Agregar nuevo item o actualizar existente
-            // Agregar nuevo item
-            let items = ticketActual[0].items
-
-            // Parsear items recursivamente para asegurar array
-            let attempts = 0;
-            while (typeof items === 'string' && attempts < 3) {
-                try {
-                    items = JSON.parse(items);
-                } catch (e) {
-                    items = [];
-                    break;
+                if (ticketActual.length === 0) {
+                    throw new Error('TICKET_NOT_FOUND')
                 }
-                attempts++;
-            }
 
-            if (!Array.isArray(items)) {
-                items = []
-            }
+                let items = ticketActual[0].items
 
-            // Buscar si ya existe el item
-            const existingItemIndex = items.findIndex((item: any) =>
-                item.tipo === itemData.tipo && item.itemId === itemData.itemId
-            )
-
-            if (existingItemIndex !== -1) {
-                // Actualizar cantidad
-                items[existingItemIndex].cantidad += itemData.cantidad
-                items[existingItemIndex].subtotal = items[existingItemIndex].cantidad * items[existingItemIndex].precio
-            } else {
-                // Agregar nuevo item
-                const nuevoItem = {
-                    tipo: itemData.tipo,
-                    itemId: itemData.itemId,
-                    cantidad: itemData.cantidad,
-                    precio: itemData.precio,
-                    subtotal: itemData.cantidad * itemData.precio
+                let attempts = 0;
+                while (typeof items === 'string' && attempts < 3) {
+                    try {
+                        items = JSON.parse(items);
+                    } catch (e) {
+                        items = [];
+                        break;
+                    }
+                    attempts++;
                 }
-                items.push(nuevoItem)
-            }
 
-            // Calcular nuevo total
-            const nuevoTotal = items.reduce((sum: number, item: any) => sum + item.subtotal, 0)
+                if (!Array.isArray(items)) {
+                    items = []
+                }
 
-            // Actualizar ticket
-            const ticketActualizado = await sql`
-                UPDATE tickets
-                SET items = ${JSON.stringify(items)}::jsonb,
-                    total = ${nuevoTotal},
-                    actualizado_en = NOW()
-                WHERE id = ${id}
-                RETURNING id, usuario_id, punto_venta_id, items, total, estado, creado_en
-            `
+                const existingItemIndex = items.findIndex((item: any) =>
+                    item.tipo === itemData.tipo && item.itemId === itemData.itemId
+                )
+
+                if (existingItemIndex !== -1) {
+                    items[existingItemIndex].cantidad += itemData.cantidad
+                    items[existingItemIndex].subtotal = items[existingItemIndex].cantidad * items[existingItemIndex].precio
+                } else {
+                    const nuevoItem = {
+                        tipo: itemData.tipo,
+                        itemId: itemData.itemId,
+                        cantidad: itemData.cantidad,
+                        precio: itemData.precio,
+                        subtotal: itemData.cantidad * itemData.precio
+                    }
+                    items.push(nuevoItem)
+                }
+
+                const nuevoTotal = items.reduce((sum: number, item: any) => sum + item.subtotal, 0)
+
+                const updated = await tx`
+                    UPDATE tickets
+                    SET items = ${JSON.stringify(items)}::jsonb,
+                        total = ${nuevoTotal},
+                        actualizado_en = NOW()
+                    WHERE id = ${id}
+                    RETURNING id, usuario_id, punto_venta_id, items, total, estado, creado_en
+                `
+
+                return updated[0]
+            })
 
             return {
-                ticketId: ticketActualizado[0].id,
-                staffId: ticketActualizado[0].usuario_id,
-                puntoVentaId: ticketActualizado[0].punto_venta_id,
-                items: ticketActualizado[0].items,
-                total: Number(ticketActualizado[0].total),
-                estado: ticketActualizado[0].estado
+                ticketId: ticketActualizado.id,
+                staffId: ticketActualizado.usuario_id,
+                puntoVentaId: ticketActualizado.punto_venta_id,
+                items: ticketActualizado.items,
+                total: Number(ticketActualizado.total),
+                estado: ticketActualizado.estado
             }
         } catch (err) {
+            if (err instanceof Error && err.message === 'TICKET_NOT_FOUND') {
+                return reply.code(404).send({ error: 'Ticket no encontrado' })
+            }
             if (err instanceof z.ZodError) {
                 return reply.code(400).send({ error: 'Validation Error', details: err.errors })
             }
@@ -172,70 +169,74 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
         try {
             const { id, itemId } = request.params as { id: string, itemId: string }
             const { cantidad } = z.object({ cantidad: z.number().int() }).parse(request.body)
+            const ticketActualizado = await sql.begin(async (tx: any) => {
+                const ticketActual = await tx`
+                    SELECT items FROM tickets WHERE id = ${id} FOR UPDATE
+                `
 
-            // Obtener ticket actual
-            const ticketActual = await sql`
-                SELECT items FROM tickets WHERE id = ${id}
-            `
-
-            if (ticketActual.length === 0) {
-                return reply.code(404).send({ error: 'Ticket no encontrado' })
-            }
-
-            let items = ticketActual[0].items
-
-            // Parsear items recursivamente para asegurar array
-            let attempts = 0;
-            while (typeof items === 'string' && attempts < 3) {
-                try {
-                    items = JSON.parse(items);
-                } catch (e) {
-                    items = [];
-                    break;
+                if (ticketActual.length === 0) {
+                    throw new Error('TICKET_NOT_FOUND')
                 }
-                attempts++;
-            }
 
-            if (!Array.isArray(items)) items = []
+                let items = ticketActual[0].items
 
-            const itemIndex = items.findIndex((item: any) => item.itemId === itemId)
-
-            if (cantidad <= 0) {
-                // Eliminar item si cantidad es 0 o menor
-                if (itemIndex !== -1) {
-                    items.splice(itemIndex, 1)
+                let attempts = 0;
+                while (typeof items === 'string' && attempts < 3) {
+                    try {
+                        items = JSON.parse(items);
+                    } catch (e) {
+                        items = [];
+                        break;
+                    }
+                    attempts++;
                 }
-            } else {
-                if (itemIndex !== -1) {
-                    items[itemIndex].cantidad = cantidad
-                    items[itemIndex].subtotal = items[itemIndex].cantidad * items[itemIndex].precio
+
+                if (!Array.isArray(items)) items = []
+
+                const itemIndex = items.findIndex((item: any) => item.itemId === itemId)
+
+                if (cantidad <= 0) {
+                    if (itemIndex !== -1) {
+                        items.splice(itemIndex, 1)
+                    }
                 } else {
-                    return reply.code(404).send({ error: 'Item no encontrado en el ticket' })
+                    if (itemIndex !== -1) {
+                        items[itemIndex].cantidad = cantidad
+                        items[itemIndex].subtotal = items[itemIndex].cantidad * items[itemIndex].precio
+                    } else {
+                        throw new Error('ITEM_NOT_FOUND')
+                    }
                 }
-            }
 
-            // Calcular nuevo total
-            const nuevoTotal = items.reduce((sum: number, item: any) => sum + item.subtotal, 0)
+                const nuevoTotal = items.reduce((sum: number, item: any) => sum + item.subtotal, 0)
 
-            // Actualizar ticket
-            const ticketActualizado = await sql`
-                UPDATE tickets
-                SET items = ${JSON.stringify(items)}::jsonb,
-                    total = ${nuevoTotal},
-                    actualizado_en = NOW()
-                WHERE id = ${id}
-                RETURNING id, usuario_id, punto_venta_id, items, total, estado, creado_en
-            `
+                const updated = await tx`
+                    UPDATE tickets
+                    SET items = ${JSON.stringify(items)}::jsonb,
+                        total = ${nuevoTotal},
+                        actualizado_en = NOW()
+                    WHERE id = ${id}
+                    RETURNING id, usuario_id, punto_venta_id, items, total, estado, creado_en
+                `
+
+                return updated[0]
+            })
 
             return {
-                ticketId: ticketActualizado[0].id,
-                staffId: ticketActualizado[0].usuario_id,
-                puntoVentaId: ticketActualizado[0].punto_venta_id,
-                items: ticketActualizado[0].items,
-                total: Number(ticketActualizado[0].total),
-                estado: ticketActualizado[0].estado
+                ticketId: ticketActualizado.id,
+                staffId: ticketActualizado.usuario_id,
+                puntoVentaId: ticketActualizado.punto_venta_id,
+                items: ticketActualizado.items,
+                total: Number(ticketActualizado.total),
+                estado: ticketActualizado.estado
             }
         } catch (err) {
+            if (err instanceof Error && err.message === 'TICKET_NOT_FOUND') {
+                return reply.code(404).send({ error: 'Ticket no encontrado' })
+            }
+            if (err instanceof Error && err.message === 'ITEM_NOT_FOUND') {
+                return reply.code(404).send({ error: 'Item no encontrado en el ticket' })
+            }
             if (err instanceof z.ZodError) {
                 return reply.code(400).send({ error: 'Validation Error', details: err.errors })
             }
@@ -249,62 +250,64 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
         try {
             const { id } = request.params as { id: string }
             const { itemIndex } = removerItemSchema.parse(request.body)
+            const ticketActualizado = await sql.begin(async (tx: any) => {
+                const ticketActual = await tx`
+                    SELECT items FROM tickets WHERE id = ${id} FOR UPDATE
+                `
 
-            // Obtener ticket actual
-            const ticketActual = await sql`
-                SELECT items FROM tickets WHERE id = ${id}
-            `
-
-            if (ticketActual.length === 0) {
-                return reply.code(404).send({ error: 'Ticket no encontrado' })
-            }
-
-            // Remover item
-            // Remover item
-            let items = ticketActual[0].items
-
-            // Parsear items recursivamente para asegurar array
-            let attempts = 0;
-            while (typeof items === 'string' && attempts < 3) {
-                try {
-                    items = JSON.parse(items);
-                } catch (e) {
-                    items = [];
-                    break;
+                if (ticketActual.length === 0) {
+                    throw new Error('TICKET_NOT_FOUND')
                 }
-                attempts++;
-            }
 
-            if (!Array.isArray(items)) items = []
+                let items = ticketActual[0].items
 
-            if (itemIndex >= items.length) {
-                return reply.code(400).send({ error: 'Índice de item inválido' })
-            }
+                let attempts = 0;
+                while (typeof items === 'string' && attempts < 3) {
+                    try {
+                        items = JSON.parse(items);
+                    } catch (e) {
+                        items = [];
+                        break;
+                    }
+                    attempts++;
+                }
 
-            items.splice(itemIndex, 1)
+                if (!Array.isArray(items)) items = []
 
-            // Calcular nuevo total
-            const nuevoTotal = items.reduce((sum: number, item: any) => sum + item.subtotal, 0)
+                if (itemIndex >= items.length) {
+                    throw new Error('ITEM_INDEX_INVALID')
+                }
 
-            // Actualizar ticket
-            const ticketActualizado = await sql`
-                UPDATE tickets
-                SET items = ${JSON.stringify(items)}::jsonb,
-                    total = ${nuevoTotal},
-                    actualizado_en = NOW()
-                WHERE id = ${id}
-                RETURNING id, usuario_id, punto_venta_id, items, total, estado
-            `
+                items.splice(itemIndex, 1)
+                const nuevoTotal = items.reduce((sum: number, item: any) => sum + item.subtotal, 0)
+
+                const updated = await tx`
+                    UPDATE tickets
+                    SET items = ${JSON.stringify(items)}::jsonb,
+                        total = ${nuevoTotal},
+                        actualizado_en = NOW()
+                    WHERE id = ${id}
+                    RETURNING id, usuario_id, punto_venta_id, items, total, estado
+                `
+
+                return updated[0]
+            })
 
             return {
-                ticketId: ticketActualizado[0].id,
-                staffId: ticketActualizado[0].usuario_id,
-                puntoVentaId: ticketActualizado[0].punto_venta_id,
-                items: ticketActualizado[0].items,
-                total: ticketActualizado[0].total,
-                estado: ticketActualizado[0].estado
+                ticketId: ticketActualizado.id,
+                staffId: ticketActualizado.usuario_id,
+                puntoVentaId: ticketActualizado.punto_venta_id,
+                items: ticketActualizado.items,
+                total: ticketActualizado.total,
+                estado: ticketActualizado.estado
             }
         } catch (err) {
+            if (err instanceof Error && err.message === 'TICKET_NOT_FOUND') {
+                return reply.code(404).send({ error: 'Ticket no encontrado' })
+            }
+            if (err instanceof Error && err.message === 'ITEM_INDEX_INVALID') {
+                return reply.code(400).send({ error: 'Índice de item inválido' })
+            }
             if (err instanceof z.ZodError) {
                 return reply.code(400).send({ error: 'Validation Error', details: err.errors })
             }

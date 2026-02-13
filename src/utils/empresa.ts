@@ -1,4 +1,4 @@
-import sql from '../db.js';
+import sqlAdmin from '../db-admin.js';
 import { FastifyRequest } from 'fastify';
 
 /**
@@ -6,11 +6,47 @@ import { FastifyRequest } from 'fastify';
  * Usado como fallback cuando no hay punto de venta especificado
  */
 export async function getDefaultEmpresaId(): Promise<string> {
-    const result = await sql`SELECT id FROM empresas LIMIT 1`;
+    const result = await sqlAdmin`SELECT id FROM empresas ORDER BY creado_en ASC, id ASC LIMIT 1`;
     if (result.length === 0) {
         throw new Error('No hay empresas configuradas en el sistema');
     }
     return result[0].id;
+}
+
+export async function obtenerEmpresaIdConPuntosVentaActivos(): Promise<string> {
+    const result = await sqlAdmin`
+        SELECT e.id
+        FROM empresas e
+        WHERE EXISTS (
+            SELECT 1
+            FROM puntos_venta pv
+            WHERE pv.empresa_id = e.id
+              AND pv.activo = true
+        )
+        ORDER BY e.creado_en ASC, e.id ASC
+        LIMIT 1
+    `
+
+    if (result.length > 0) {
+        return result[0].id
+    }
+
+    return getDefaultEmpresaId()
+}
+
+export async function obtenerEmpresaIdDesdeUsuario(usuarioId: string): Promise<string> {
+    const result = await sqlAdmin`
+        SELECT empresa_id
+        FROM usuarios
+        WHERE id = ${usuarioId}
+        LIMIT 1
+    `
+
+    if (result.length === 0 || !result[0].empresa_id) {
+        return getDefaultEmpresaId()
+    }
+
+    return result[0].empresa_id
 }
 
 /**
@@ -31,7 +67,7 @@ export async function getEmpresaIdFromRequest(request: FastifyRequest): Promise<
     if (puntoVentaId) {
         try {
             // Consultar empresa_id del punto de venta
-            const result = await sql`
+            const result = await sqlAdmin`
                 SELECT empresa_id 
                 FROM puntos_venta 
                 WHERE id = ${puntoVentaId}
@@ -50,6 +86,21 @@ export async function getEmpresaIdFromRequest(request: FastifyRequest): Promise<
         }
     }
 
-    // Fallback: usar empresa por defecto
-    return getDefaultEmpresaId();
+    // Fallback: usar empresa que tenga puntos de venta activos
+    return obtenerEmpresaIdConPuntosVentaActivos();
+}
+
+export async function obtenerEmpresaIdPorPuntoVenta(puntoVentaId: string): Promise<string> {
+    const result = await sqlAdmin`
+        SELECT empresa_id
+        FROM puntos_venta
+        WHERE id = ${puntoVentaId}
+        LIMIT 1
+    `
+
+    if (result.length === 0) {
+        throw new Error('Punto de venta no encontrado para resolver empresa')
+    }
+
+    return result[0].empresa_id
 }

@@ -3,18 +3,14 @@ import { setRLSContext } from '../utils/rls.js';
 
 /**
  * Middleware de Row-Level Security
- * 
- * Configura automáticamente el contexto de empresa_id en PostgreSQL
- * antes de cada request, activando las políticas RLS.
- * 
- * Esto garantiza que TODOS los queries estén automáticamente filtrados
- * por empresa, sin importar si el desarrollador lo especifica o no.
+ *
+ * Configura el contexto de empresa_id por request para consultas que
+ * usen el contexto de sesion en DB.
  */
 const rlsMiddleware: FastifyPluginAsync = async (fastify) => {
     // Hook que se ejecuta ANTES de cada request
     fastify.addHook('onRequest', async (request, reply) => {
         try {
-            // Configurar contexto RLS en PostgreSQL
             // Lee punto_venta_id del header 'X-Punto-Venta-Id'
             const empresaId = await setRLSContext(request);
 
@@ -31,7 +27,7 @@ const rlsMiddleware: FastifyPluginAsync = async (fastify) => {
         }
     });
 
-    fastify.log.info('✅ RLS Middleware enabled - Automatic empresa_id filtering active');
+    fastify.log.info('RLS middleware enabled - empresa_id context per request active');
 };
 
 export default rlsMiddleware;

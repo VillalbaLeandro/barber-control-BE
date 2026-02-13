@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs'
 import { randomBytes } from 'crypto'
-import sql from '../db.js'
+import sqlAdmin from '../db-admin.js'
 
 const SALT_ROUNDS = 10
 const SESSION_DURATION_HOURS = 12
@@ -21,7 +21,7 @@ export const authService = {
         expiraEn.setHours(expiraEn.getHours() + SESSION_DURATION_HOURS)
 
         // Guardar en DB (tabla sesiones unificada)
-        await sql`
+        await sqlAdmin`
             INSERT INTO sesiones (usuario_id, token, expira_en)
             VALUES (${usuarioId}, ${token}, ${expiraEn})
         `
@@ -30,7 +30,7 @@ export const authService = {
     },
 
     async verifySession(token: string) {
-        const result = await sql`
+        const result = await sqlAdmin`
             SELECT 
                 s.usuario_id, 
                 u.nombre_completo as nombre, 
@@ -49,7 +49,7 @@ export const authService = {
     },
 
     async logout(token: string) {
-        await sql`
+        await sqlAdmin`
             DELETE FROM sesiones WHERE token = ${token}
         `
     }

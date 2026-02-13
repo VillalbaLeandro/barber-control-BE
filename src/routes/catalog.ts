@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import sql from '../db.js';
+import sqlAdmin from '../db-admin.js';
 import { z } from 'zod';
 import type { Item, ItemCompleto } from '../types/items.js';
 import { getEmpresaIdFromRequest } from '../utils/empresa.js';
@@ -268,11 +269,14 @@ const catalogRoutes: FastifyPluginAsync = async (fastify) => {
 
     // GET /catalogo/servicios - Mantener compatibilidad
     fastify.get('/catalogo/servicios', async (request, reply) => {
-        const items = await sql`
+        const empresaId = await getEmpresaIdFromRequest(request)
+        const items = await sqlAdmin`
             SELECT i.*, s.duracion_min
             FROM items i
             JOIN items_servicio s ON i.id = s.item_id
-            WHERE i.tipo = 'servicio'::item_tipo AND i.activo = true
+            WHERE i.tipo = 'servicio'::item_tipo
+              AND i.activo = true
+              AND i.empresa_id = ${empresaId}
             ORDER BY i.orden_ui, i.nombre
         `;
         return items;
@@ -280,12 +284,15 @@ const catalogRoutes: FastifyPluginAsync = async (fastify) => {
 
     // GET /catalogo/productos - Mantener compatibilidad
     fastify.get('/catalogo/productos', async (request, reply) => {
-        const items = await sql`
+        const empresaId = await getEmpresaIdFromRequest(request)
+        const items = await sqlAdmin`
             SELECT i.*, p.costo, p.maneja_stock, p.stock_actual, 
                    p.stock_minimo, p.permite_consumo_staff
             FROM items i
             JOIN items_producto p ON i.id = p.item_id
-            WHERE i.tipo = 'producto'::item_tipo AND i.activo = true
+            WHERE i.tipo = 'producto'::item_tipo
+              AND i.activo = true
+              AND i.empresa_id = ${empresaId}
             ORDER BY i.orden_ui, i.nombre
         `;
         return items;

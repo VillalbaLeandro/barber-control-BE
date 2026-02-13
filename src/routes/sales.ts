@@ -1,7 +1,9 @@
 import { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
-import sql from '../db.js'
-import { getDefaultEmpresaId } from '../utils/empresa.js'
+import sql from '../db-admin.js'
+import { getDefaultEmpresaId, obtenerEmpresaIdPorPuntoVenta } from '../utils/empresa.js'
+import { logAuditEvent } from '../utils/audit.js'
+import { procesarOperativaCajaEnMovimiento } from '../utils/operativa-runtime.js'
 
 const confirmSaleSchema = z.object({
     staff_id: z.string().uuid(),
@@ -14,7 +16,8 @@ const confirmSaleSchema = z.object({
         precio: z.number()
     })).optional(),
     total: z.number(),
-    metodo_pago: z.string()
+    metodo_pago: z.string(),
+    accionCajaCerrada: z.enum(['abrir', 'fuera_caja']).optional(),
 })
 
 const confirmConsumptionSchema = z.object({
@@ -23,6 +26,11 @@ const confirmConsumptionSchema = z.object({
         producto_id: z.string().uuid().or(z.number()), // Support both for now/legacy
         cantidad: z.number()
     }))
+})
+
+const quickCancelSaleSchema = z.object({
+    staff_id: z.string().uuid(),
+    punto_venta_id: z.string().uuid(),
 })
 
 const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
@@ -67,40 +75,28 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return reply.code(400).send({ error: 'No hay items para confirmar' })
             }
 
-            // 2. Obtener Caja Abierta/Default para el Punto de Venta
-            const empresaId = await getDefaultEmpresaId();
-            const cajas = await sql`
-                SELECT id FROM cajas 
-                WHERE punto_venta_id = ${data.punto_venta_id} 
-                AND empresa_id = ${empresaId}
-                AND activa = true 
-                LIMIT 1
-            `
+            const resultadoCaja = await procesarOperativaCajaEnMovimiento({
+                puntoVentaId: data.punto_venta_id,
+                usuarioId: data.staff_id,
+                request,
+                motivo: 'confirmacion_venta',
+                accionCajaCerrada: data.accionCajaCerrada,
+            })
 
-            // Si no hay caja, intentar buscar cualquiera del PV, o crear una virtual
-            let cajaId = cajas.length > 0 ? cajas[0].id : null;
-            if (!cajaId) {
-                // Fallback: Buscar "Caja Principal" o cualquiera
-                const cualquierCaja = await sql`
-                    SELECT id FROM cajas 
-                    WHERE punto_venta_id = ${data.punto_venta_id} 
-                    AND empresa_id = ${empresaId}
-                    LIMIT 1
-                `
-                if (cualquierCaja.length > 0) {
-                    cajaId = cualquierCaja[0].id;
-                } else {
-                    // Auto-crear caja virtual si no existe ninguna
-                    console.warn('⚠️ No hay cajas para este PV, creando caja virtual automáticamente');
-                    const nuevaCaja = await sql`
-                        INSERT INTO cajas (punto_venta_id, empresa_id, nombre, es_virtual, activa)
-                        VALUES (${data.punto_venta_id}, ${empresaId}, 'Caja Virtual (Auto)', true, true)
-                        RETURNING id
-                    `
-                    cajaId = nuevaCaja[0].id;
-                    console.log('✅ Caja virtual creada:', cajaId);
-                }
+            if (resultadoCaja.requiereDecisionCajaCerrada) {
+                return reply.code(409).send({
+                    error: 'CAJA_CERRADA_REQUIERE_DECISION',
+                    mensaje: resultadoCaja.mensajeDecision,
+                    puedeAbrirCaja: resultadoCaja.puedeAbrirCaja,
+                    accionSugerida: resultadoCaja.accionSugerida,
+                })
             }
+
+            const empresaId = resultadoCaja.empresaId
+            const cajaId = resultadoCaja.cajaId
+            const cajaAbierta = resultadoCaja.cajaAbierta
+
+            const fueraCaja = !cajaAbierta;
 
             // 3. Obtener Medio de Pago ID
             const medios = await sql`
@@ -127,6 +123,7 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                         total,
                         medio_pago_id,
                         medio_pago_nombre,
+                        fuera_caja,
                         confirmado_en
                     )
                     VALUES (
@@ -140,6 +137,7 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                         ${data.total},
                         ${medioPagoId},
                         ${medioPagoNombre},
+                        ${fueraCaja},
                         NOW()
                     )
                     RETURNING id
@@ -197,6 +195,21 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return { success: true, venta_id: transaccionId };
             });
 
+            await logAuditEvent({
+                empresaId,
+                usuarioId: data.staff_id,
+                accion: 'venta_confirmada',
+                entidad: 'transaccion',
+                entidadId: result.venta_id,
+                metadata: {
+                    puntoVentaId: data.punto_venta_id,
+                    total: data.total,
+                    metodoPago: data.metodo_pago,
+                    fueraCaja,
+                },
+                request
+            })
+
             return result;
 
         } catch (err) {
@@ -204,7 +217,79 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
             if (err instanceof z.ZodError) {
                 return reply.code(400).send({ error: 'Validation Error', details: err.errors })
             }
+            if ((err as any)?.codigo === 'CAJA_CERRADA_BLOQUEADA') {
+                return reply.code(409).send({
+                    error: 'CAJA_CERRADA_BLOQUEADA',
+                    mensaje: (err as Error).message,
+                })
+            }
             return reply.code(500).send({ error: 'Internal Server Error', details: (err as any).message })
+        }
+    })
+
+    fastify.post('/ventas/:id/cancelar-rapido', async (request, reply) => {
+        try {
+            const { id } = request.params as { id: string }
+            const data = quickCancelSaleSchema.parse(request.body)
+            const empresaId = await obtenerEmpresaIdPorPuntoVenta(data.punto_venta_id)
+
+            const ventas = await sql`
+                SELECT id, estado, usuario_id, punto_venta_id, confirmado_en, total
+                FROM transacciones
+                WHERE id = ${id}
+                AND empresa_id = ${empresaId}
+                AND tipo = 'venta_cliente'
+                LIMIT 1
+            `
+
+            if (ventas.length === 0) {
+                return reply.code(404).send({ error: 'Venta no encontrada' })
+            }
+
+            const venta = ventas[0]
+
+            if (venta.estado === 'anulada') {
+                return { success: true, alreadyCancelled: true, venta_id: id }
+            }
+
+            if (venta.usuario_id !== data.staff_id || venta.punto_venta_id !== data.punto_venta_id) {
+                return reply.code(403).send({ error: 'No permitido para esta venta' })
+            }
+
+            const confirmedAt = venta.confirmado_en ? new Date(venta.confirmado_en).getTime() : 0
+            const diffMs = Date.now() - confirmedAt
+            if (!confirmedAt || diffMs > 5000) {
+                return reply.code(400).send({ error: 'Ventana de cancelación expirada' })
+            }
+
+            await sql`
+                UPDATE transacciones
+                SET estado = 'anulada',
+                    anulada_en = NOW(),
+                    motivo_anulacion = 'Corrección inmediata POS'
+                WHERE id = ${id}
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: data.staff_id,
+                accion: 'venta_cancelada_rapida',
+                entidad: 'transaccion',
+                entidadId: id,
+                metadata: {
+                    puntoVentaId: data.punto_venta_id,
+                    total: Number(venta.total),
+                },
+                request
+            })
+
+            return { success: true, venta_id: id }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Validation Error', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Internal Server Error' })
         }
     })
 

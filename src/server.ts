@@ -57,6 +57,30 @@ fastify.get('/', async (request, reply) => {
 const start = async () => {
     try {
         const port = parseInt(process.env.PORT || '3000')
+
+        const roleInfo = await sql<{
+            current_user: string
+            bypass: boolean
+            super: boolean
+        }[]>`
+            SELECT
+                current_user,
+                (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypass,
+                (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS super
+        `
+
+        const activeRole = roleInfo[0]
+        if (activeRole?.bypass) {
+            fastify.log.warn(
+                {
+                    dbRole: activeRole.current_user,
+                    bypassRls: activeRole.bypass,
+                    superuser: activeRole.super,
+                },
+                'DB role has BYPASSRLS enabled; enforce empresa_id filtering in application queries'
+            )
+        }
+
         await fastify.listen({ port, host: '0.0.0.0' })
         console.log(`Server listening on port ${port}`)
     } catch (err) {

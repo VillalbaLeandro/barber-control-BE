@@ -3,10 +3,10 @@ import { getEmpresaIdFromRequest } from './empresa.js';
 import { FastifyRequest } from 'fastify';
 
 /**
- * Configura el empresa_id en la sesión de PostgreSQL para Row-Level Security
- * 
- * IMPORTANTE: Esta función DEBE ser llamada antes de cualquier query
- * para que las políticas RLS funcionen correctamente.
+ * Configura el empresa_id en sesión PostgreSQL como contexto operativo.
+ *
+ * Nota: este valor no reemplaza los filtros explícitos por empresa en queries.
+ * Se usa como capa adicional y para escenarios que sí ejecuten políticas RLS.
  * 
  * @param request - Request de Fastify para obtener punto_venta_id
  * @returns Promise<string> - El empresa_id configurado
@@ -14,9 +14,7 @@ import { FastifyRequest } from 'fastify';
 export async function setRLSContext(request: FastifyRequest): Promise<string> {
     const empresaId = await getEmpresaIdFromRequest(request);
 
-    // Configurar variable de sesión en PostgreSQL
-    // Esto activa las políticas RLS automáticamente
-    await sql`SET LOCAL app.current_empresa_id = ${empresaId}`;
+    await sql`SELECT set_config('app.current_empresa_id', ${empresaId}, false)`;
 
     return empresaId;
 }
@@ -26,14 +24,14 @@ export async function setRLSContext(request: FastifyRequest): Promise<string> {
  * ⚠️ USAR CON EXTREMA PRECAUCIÓN
  */
 export async function enableRLSBypass(): Promise<void> {
-    await sql`SET LOCAL app.bypass_rls = true`;
+    await sql`SELECT set_config('app.bypass_rls', 'true', false)`;
 }
 
 /**
  * Deshabilita bypass de RLS
  */
 export async function disableRLSBypass(): Promise<void> {
-    await sql`SET LOCAL app.bypass_rls = false`;
+    await sql`SELECT set_config('app.bypass_rls', 'false', false)`;
 }
 
 /**
