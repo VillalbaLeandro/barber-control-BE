@@ -1,6 +1,9 @@
 import sql from '../db-admin.js'
 
 export type OperativeConfig = {
+    regional: {
+        timezone: string
+    }
     pin: {
         habilitar_limite_intentos: boolean
         max_intentos: number
@@ -14,13 +17,18 @@ export type OperativeConfig = {
         apertura_hora: string | null
         apertura_roles_permitidos: string[]
         accion_caja_cerrada: 'preguntar' | 'fuera_caja' | 'bloquear'
+        permitir_ventas_fuera_caja: boolean
+        manejo_fuera_caja_al_cerrar: 'preguntar' | 'incluir' | 'excluir'
     }
     consumos: {
-        al_cierre_sin_liquidar: 'pendiente_siguiente_caja' | 'cobro_automatico_venta' | 'cobro_automatico_costo' | 'perdonado'
+        al_cierre_sin_liquidar: 'pendiente_siguiente_caja' | 'cobro_automatico_venta' | 'cobro_automatico_costo' | 'perdonado' | 'no_permitir_cierre'
     }
 }
 
 export const DEFAULT_OPERATIVE_CONFIG: OperativeConfig = {
+    regional: {
+        timezone: 'America/Argentina/Buenos_Aires',
+    },
     pin: {
         habilitar_limite_intentos: false,
         max_intentos: 5,
@@ -34,6 +42,8 @@ export const DEFAULT_OPERATIVE_CONFIG: OperativeConfig = {
         apertura_hora: null,
         apertura_roles_permitidos: [],
         accion_caja_cerrada: 'preguntar',
+        permitir_ventas_fuera_caja: true,
+        manejo_fuera_caja_al_cerrar: 'preguntar',
     },
     consumos: {
         al_cierre_sin_liquidar: 'pendiente_siguiente_caja',

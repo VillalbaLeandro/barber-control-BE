@@ -23,15 +23,17 @@ const staffRoutes: FastifyPluginAsync = async (fastify, opts) => {
     // Listar todo el staff (público por ahora, luego admin)
     fastify.get('/staff', async (request, reply) => {
         try {
-                const staff = await sql`
+            const empresaId = await getEmpresaIdFromRequest(request)
+            const staff = await sql`
                 SELECT
                     u.id,
                     u.nombre_completo as nombre,
                     COALESCE(lower(r.nombre), 'vendedor') as rol,
                     u.bloqueado_hasta
-                FROM usuarios
+                FROM usuarios u
                 LEFT JOIN roles r ON r.id = u.rol_id
                 WHERE u.activo = true
+                  AND u.empresa_id = ${empresaId}
                 ORDER BY u.nombre_completo ASC
             `
             return staff

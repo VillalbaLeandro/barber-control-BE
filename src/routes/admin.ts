@@ -41,6 +41,9 @@ const operativaUpdateSchema = z.object({
     scope: z.enum(['empresa', 'pv']).default('empresa'),
     puntoVentaId: z.string().uuid().optional(),
     config: z.object({
+        regional: z.object({
+            timezone: z.string().min(3).max(80).optional(),
+        }).optional(),
         pin: z.object({
             habilitar_limite_intentos: z.boolean().optional(),
             max_intentos: z.number().int().min(1).max(20).optional(),
@@ -54,6 +57,8 @@ const operativaUpdateSchema = z.object({
             apertura_hora: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/).nullable().optional(),
             apertura_roles_permitidos: z.array(z.string().uuid()).optional(),
             accion_caja_cerrada: z.enum(['preguntar', 'fuera_caja', 'bloquear']).optional(),
+            permitir_ventas_fuera_caja: z.boolean().optional(),
+            manejo_fuera_caja_al_cerrar: z.enum(['preguntar', 'incluir', 'excluir']).optional(),
         }).optional(),
         consumos: z.object({
             al_cierre_sin_liquidar: z.enum([
@@ -61,9 +66,20 @@ const operativaUpdateSchema = z.object({
                 'cobro_automatico_venta',
                 'cobro_automatico_costo',
                 'perdonado',
+                'no_permitir_cierre',
             ]).optional(),
         }).optional(),
     })
+})
+
+const fueraCajaDecisionSchema = z.object({
+    puntoVentaId: z.string().uuid(),
+    transaccionIds: z.array(z.string().uuid()).min(1),
+    accion: z.enum(['imputar_a_caja_actual', 'marcar_solo_balance', 'dejar_pendiente']),
+    motivo: z.string().max(500).optional(),
+    abrirCajaSiHaceFalta: z.boolean().optional(),
+    montoInicialApertura: z.number().min(0).optional(),
+    medioPago: z.enum(['efectivo', 'tarjeta', 'transferencia']).optional(),
 })
 
 const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
@@ -167,7 +183,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             console.log('✅ Sesión creada:', session.token);
 
             await logAuditEvent({
-                empresaId: await getDefaultEmpresaId(),
+                empresaId: await obtenerEmpresaIdDesdeUsuario(usuario.id),
                 usuarioId: usuario.id,
                 accion: 'admin_login',
                 entidad: 'sesion_admin',
@@ -216,8 +232,11 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         if (token) {
             const session = await authService.verifySession(token)
             await authService.logout(token)
+            const empresaId = session?.usuario_id
+                ? await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+                : await getDefaultEmpresaId()
             await logAuditEvent({
-                empresaId: await getDefaultEmpresaId(),
+                empresaId,
                 usuarioId: session?.usuario_id ?? null,
                 accion: 'admin_logout',
                 entidad: 'sesion_admin',
@@ -468,7 +487,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return reply.code(400).send({ error: 'puntoVentaId es requerido para scope pv' })
             }
 
-            const empresaId = await getDefaultEmpresaId()
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
             const effective = await getOperativeConfig(empresaId, scope === 'pv' ? puntoVentaId : null)
 
             const wherePv = scope === 'pv' ? puntoVentaId : null
@@ -510,7 +529,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return reply.code(400).send({ error: 'puntoVentaId es requerido para scope pv' })
             }
 
-            const empresaId = await getDefaultEmpresaId()
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
             const wherePv = scope === 'pv' ? puntoVentaId : null
 
             const existing = await sql`
@@ -588,6 +607,8 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         }
         console.log('✅ Session valid for dashboard');
 
+        const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
         // 1. Ventas de Hoy
         const ventasHoy = await sql`
             SELECT 
@@ -595,6 +616,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 COUNT(*) as cantidad
             FROM transacciones 
             WHERE tipo = 'venta_cliente' 
+            AND empresa_id = ${empresaId}
             AND DATE(creado_en) = CURRENT_DATE
             AND estado = 'confirmada'
         `
@@ -605,25 +627,16 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 COUNT(*) as cantidad,
                 COALESCE(SUM(total_venta), 0) as total_estimado
             FROM consumos_staff 
-            WHERE estado_liquidacion = 'pendiente'
+            WHERE punto_venta_id IN (
+                SELECT id FROM puntos_venta WHERE empresa_id = ${empresaId}
+            )
+            AND estado_liquidacion = 'pendiente'
         `
 
         // 3. Ticket Promedio Hoy
         const ticketPromedio = ventasHoy[0].cantidad > 0
             ? Number(ventasHoy[0].total) / Number(ventasHoy[0].cantidad)
             : 0
-
-        // 4. Últimas 5 Transacciones
-        const ultimasTransacciones = await sql`
-            SELECT t.id, t.tipo, t.total, t.creado_en, pv.nombre as punto_venta, u.nombre_completo as staff
-            FROM transacciones t
-            JOIN puntos_venta pv ON t.punto_venta_id = pv.id
-            LEFT JOIN usuarios u ON t.usuario_id = u.id
-            ORDER BY t.creado_en DESC
-            LIMIT 5
-        `
-        // Corrección query ultimasTransacciones: staff_id en transacciones es FK a staff(id)
-        // La tabla staff tiene campo nombre_completo
 
         const ultimas = await sql`
             SELECT 
@@ -636,6 +649,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             FROM transacciones t
             JOIN puntos_venta pv ON t.punto_venta_id = pv.id
             JOIN usuarios u ON t.usuario_id = u.id
+            WHERE t.empresa_id = ${empresaId}
             ORDER BY t.creado_en DESC
             LIMIT 5
         `
@@ -668,6 +682,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
         try {
             const query = request.query as any
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
             const puntoVentaId = query.puntoVentaId
             const staffId = query.staffId
             const fechaDesde = query.fechaDesde
@@ -694,6 +709,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 JOIN puntos_venta pv ON t.punto_venta_id = pv.id
                 LEFT JOIN usuarios u ON t.usuario_id = u.id
                 WHERE t.tipo = 'venta_cliente' 
+                AND t.empresa_id = ${empresaId}
                 ${estado ? sql`AND t.estado = ${estado}` : sql``}
                 ${puntoVentaId ? sql`AND t.punto_venta_id = ${puntoVentaId}` : sql``}
                 ${staffId ? sql`AND t.usuario_id = ${staffId}` : sql``}
@@ -726,6 +742,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
         try {
             const { id } = request.params as { id: string }
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             const transacciones = await sql`
                 SELECT 
@@ -749,6 +766,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 JOIN puntos_venta pv ON t.punto_venta_id = pv.id
                 LEFT JOIN usuarios u ON t.usuario_id = u.id
                 WHERE t.id = ${id}
+                AND t.empresa_id = ${empresaId}
             `
 
             if (transacciones.length === 0) {
@@ -800,7 +818,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         try {
             const { id } = request.params as { id: string }
             const { motivo } = cancelarVentaSchema.parse(request.body ?? {})
-            const empresaId = await getDefaultEmpresaId()
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             const transacciones = await sql`
                 SELECT id, estado, total, punto_venta_id
@@ -872,7 +890,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             const fechaHasta = query.fechaHasta
             const limit = parseInt(query.limit) || 100
             const offset = parseInt(query.offset) || 0
-            const empresaId = await getDefaultEmpresaId()
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             const eventos = await sql`
                 SELECT
@@ -903,6 +921,273 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         }
     })
 
+    // Ventas fuera de caja (pendientes y resueltas)
+    fastify.get('/admin/caja/fuera-caja', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const query = request.query as any
+            const puntoVentaId = query.puntoVentaId
+            const estado = query.estado as string | undefined
+            const limit = Math.min(parseInt(query.limit) || 100, 300)
+            const offset = parseInt(query.offset) || 0
+
+            if (!puntoVentaId) {
+                return reply.code(400).send({ error: 'puntoVentaId es requerido' })
+            }
+
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const whereEstado =
+                estado === 'pendiente_caja'
+                    ? sql`AND COALESCE(t.fuera_caja_estado, CASE WHEN t.conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) = 'pendiente_caja'`
+                    : estado === 'imputada_caja'
+                        ? sql`AND COALESCE(t.fuera_caja_estado, CASE WHEN t.conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) = 'imputada_caja'`
+                        : estado === 'solo_balance'
+                            ? sql`AND COALESCE(t.fuera_caja_estado, CASE WHEN t.conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) = 'solo_balance'`
+                            : sql``
+
+            const ventas = await sql`
+                SELECT
+                    t.id,
+                    t.total,
+                    t.medio_pago_nombre,
+                    t.creado_en,
+                    t.confirmado_en,
+                    t.conciliada_en,
+                    COALESCE(t.fuera_caja_estado, CASE WHEN t.conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) as fuera_caja_estado,
+                    u.nombre_completo as staff,
+                    pv.nombre as punto_venta
+                FROM transacciones t
+                JOIN puntos_venta pv ON pv.id = t.punto_venta_id
+                LEFT JOIN usuarios u ON u.id = t.usuario_id
+                WHERE t.empresa_id = ${empresaId}
+                  AND t.punto_venta_id = ${puntoVentaId}
+                  AND t.estado = 'confirmada'
+                  AND t.fuera_caja = true
+                  ${whereEstado}
+                ORDER BY t.creado_en DESC
+                LIMIT ${limit}
+                OFFSET ${offset}
+            `
+
+            const kpis = await sql`
+                SELECT
+                    COALESCE(SUM(CASE WHEN COALESCE(fuera_caja_estado, CASE WHEN conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) = 'pendiente_caja' THEN total ELSE 0 END), 0) as pendiente_total,
+                    COALESCE(COUNT(*) FILTER (WHERE COALESCE(fuera_caja_estado, CASE WHEN conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) = 'pendiente_caja'), 0) as pendiente_cantidad,
+                    COALESCE(SUM(CASE WHEN COALESCE(fuera_caja_estado, CASE WHEN conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) = 'imputada_caja' AND DATE(COALESCE(conciliada_en, creado_en)) = CURRENT_DATE THEN total ELSE 0 END), 0) as imputada_hoy_total,
+                    COALESCE(SUM(CASE WHEN COALESCE(fuera_caja_estado, CASE WHEN conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) = 'solo_balance' AND DATE(COALESCE(conciliada_en, creado_en)) = CURRENT_DATE THEN total ELSE 0 END), 0) as solo_balance_hoy_total,
+                    COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(creado_en))) / 60, 0) as antiguedad_max_minutos
+                FROM transacciones
+                WHERE empresa_id = ${empresaId}
+                  AND punto_venta_id = ${puntoVentaId}
+                  AND estado = 'confirmada'
+                  AND fuera_caja = true
+            `
+
+            return {
+                ventas,
+                kpis: {
+                    pendienteCantidad: Number(kpis[0]?.pendiente_cantidad || 0),
+                    pendienteTotal: Number(kpis[0]?.pendiente_total || 0),
+                    imputadaCajaHoyTotal: Number(kpis[0]?.imputada_hoy_total || 0),
+                    soloBalanceHoyTotal: Number(kpis[0]?.solo_balance_hoy_total || 0),
+                    antiguedadMaxMinutos: Math.round(Number(kpis[0]?.antiguedad_max_minutos || 0)),
+                },
+            }
+        } catch (err) {
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.post('/admin/caja/fuera-caja/decidir', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const {
+                puntoVentaId,
+                transaccionIds,
+                accion,
+                motivo,
+                abrirCajaSiHaceFalta,
+                montoInicialApertura,
+                medioPago,
+            } = fueraCajaDecisionSchema.parse(request.body)
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const transacciones = await sql`
+                SELECT id, total, caja_id,
+                    COALESCE(fuera_caja_estado, CASE WHEN conciliada_en IS NULL THEN 'pendiente_caja' ELSE 'imputada_caja' END) as fuera_caja_estado
+                FROM transacciones
+                WHERE empresa_id = ${empresaId}
+                  AND punto_venta_id = ${puntoVentaId}
+                  AND estado = 'confirmada'
+                  AND fuera_caja = true
+                  AND id = ANY(${transaccionIds})
+            `
+
+            if (transacciones.length === 0) {
+                return reply.code(404).send({ error: 'No se encontraron ventas fuera de caja para procesar' })
+            }
+
+            const idsPendientes = transacciones
+                .filter((t) => t.fuera_caja_estado === 'pendiente_caja')
+                .map((t) => t.id as string)
+
+            if (idsPendientes.length === 0) {
+                return { success: true, procesadas: 0, mensaje: 'No hay ventas pendientes para aplicar' }
+            }
+
+            let cajaAbierta = false
+            let cajaIdActiva: string | null = null
+            const cajas = await sql`
+                SELECT id, abierta
+                FROM cajas
+                WHERE empresa_id = ${empresaId}
+                  AND punto_venta_id = ${puntoVentaId}
+                  AND activa = true
+                ORDER BY creado_en ASC
+                LIMIT 1
+            `
+
+            if (cajas.length > 0) {
+                cajaIdActiva = cajas[0].id as string
+                cajaAbierta = Boolean(cajas[0].abierta)
+            }
+
+            if (accion === 'imputar_a_caja_actual') {
+                if (!cajaIdActiva) {
+                    return reply.code(409).send({ error: 'CAJA_NO_CONFIGURADA', mensaje: 'No hay caja activa para este punto de venta' })
+                }
+
+                if (!cajaAbierta) {
+                    if (!abrirCajaSiHaceFalta) {
+                        return reply.code(409).send({
+                            error: 'CAJA_CERRADA_REQUIERE_APERTURA',
+                            mensaje: 'La caja está cerrada. Puedes abrirla para imputar estas ventas.',
+                        })
+                    }
+
+                    await sql`
+                        UPDATE cajas
+                        SET abierta = true,
+                            monto_inicial_actual = ${Number(montoInicialApertura || 0)},
+                            fecha_apertura_actual = NOW(),
+                            actualizado_en = NOW()
+                        WHERE id = ${cajaIdActiva}
+                    `
+                    cajaAbierta = true
+                }
+
+                let medioPagoId: string | null = null
+                let medioPagoNombre: string | null = null
+                if (medioPago) {
+                    const medios = await sql`
+                        SELECT id, nombre
+                        FROM medios_pago
+                        WHERE nombre ILIKE ${medioPago}
+                          AND (empresa_id = ${empresaId} OR empresa_id IS NULL)
+                        ORDER BY CASE WHEN empresa_id = ${empresaId} THEN 0 ELSE 1 END, creado_en ASC
+                        LIMIT 1
+                    `
+                    medioPagoId = medios[0]?.id || null
+                    medioPagoNombre = medios[0]?.nombre || medioPago
+                }
+
+                if (medioPagoNombre) {
+                    await sql`
+                        UPDATE transacciones
+                        SET fuera_caja_estado = 'imputada_caja',
+                            conciliada_en = NOW(),
+                            caja_id = ${cajaIdActiva},
+                            medio_pago_id = ${medioPagoId},
+                            medio_pago_nombre = ${medioPagoNombre}
+                        WHERE id = ANY(${idsPendientes})
+                    `
+                } else {
+                    await sql`
+                        UPDATE transacciones
+                        SET fuera_caja_estado = 'imputada_caja',
+                            conciliada_en = NOW(),
+                            caja_id = ${cajaIdActiva}
+                        WHERE id = ANY(${idsPendientes})
+                    `
+                }
+            }
+
+            if (accion === 'marcar_solo_balance') {
+                await sql`
+                    UPDATE transacciones
+                    SET fuera_caja_estado = 'solo_balance',
+                        conciliada_en = NOW()
+                    WHERE id = ANY(${idsPendientes})
+                `
+            }
+
+            if (accion === 'dejar_pendiente') {
+                await sql`
+                    UPDATE transacciones
+                    SET fuera_caja_estado = 'pendiente_caja',
+                        conciliada_en = NULL,
+                        conciliada_en_cierre_id = NULL
+                    WHERE id = ANY(${idsPendientes})
+                `
+            }
+
+            const montoTotal = transacciones
+                .filter((t) => idsPendientes.includes(t.id as string))
+                .reduce((acc, t) => acc + Number(t.total || 0), 0)
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'fuera_caja_decision_masiva',
+                entidad: 'transaccion',
+                metadata: {
+                    puntoVentaId,
+                    accion,
+                    medioPago: medioPago || null,
+                    procesadas: idsPendientes.length,
+                    montoTotal,
+                    motivo: motivo || null,
+                    abrirCajaSiHaceFalta: Boolean(abrirCajaSiHaceFalta),
+                },
+                request,
+            })
+
+            return {
+                success: true,
+                accion,
+                procesadas: idsPendientes.length,
+                montoTotal,
+                cajaAbierta,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Validation Error', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
     // ============================================================================
     // ENDPOINTS DE CAJA
     // ============================================================================
@@ -927,7 +1212,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return reply.code(400).send({ error: 'puntoVentaId es requerido' })
             }
 
-            const empresaId = await getDefaultEmpresaId();
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             try {
                 await intentarCierreAutomaticoPuntoVenta({
@@ -987,7 +1272,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return reply.code(400).send({ error: 'cajaId y montoInicial son requeridos' })
             }
 
-            const empresaId = await getDefaultEmpresaId();
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             // Verificar que la caja no esté ya abierta
             const cajas = await sql`
@@ -1000,7 +1285,10 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             }
 
             if (cajas[0].abierta) {
-                return reply.code(400).send({ error: 'La caja ya está abierta' })
+                return reply.code(409).send({
+                    error: 'CAJA_YA_ABIERTA',
+                    mensaje: 'La caja ya está abierta',
+                })
             }
 
             // Abrir caja
@@ -1032,6 +1320,71 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
     })
 
     // Cerrar Caja
+    fastify.post('/admin/caja/ajustar-monto-inicial', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const { cajaId, nuevoMontoInicial, motivo } = request.body as any
+            if (!cajaId || nuevoMontoInicial === undefined) {
+                return reply.code(400).send({ error: 'cajaId y nuevoMontoInicial son requeridos' })
+            }
+
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const cajas = await sql`
+                SELECT id, abierta, monto_inicial_actual
+                FROM cajas
+                WHERE id = ${cajaId}
+                  AND empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (cajas.length === 0) {
+                return reply.code(404).send({ error: 'Caja no encontrada' })
+            }
+
+            const caja = cajas[0]
+            if (!caja.abierta) {
+                return reply.code(400).send({ error: 'Solo se puede ajustar una caja abierta' })
+            }
+
+            await sql`
+                UPDATE cajas
+                SET monto_inicial_actual = ${Number(nuevoMontoInicial)},
+                    actualizado_en = NOW()
+                WHERE id = ${cajaId}
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'caja_ajuste_monto_inicial',
+                entidad: 'caja',
+                entidadId: cajaId,
+                metadata: {
+                    montoAnterior: Number(caja.monto_inicial_actual),
+                    montoNuevo: Number(nuevoMontoInicial),
+                    motivo: motivo || null,
+                },
+                request,
+            })
+
+            return { success: true }
+        } catch (err) {
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    // Cerrar Caja
     fastify.post('/admin/caja/cerrar', async (request, reply) => {
         const token = request.headers.authorization?.replace('Bearer ', '')
         if (!token) {
@@ -1044,13 +1397,20 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         }
 
         try {
-            const { cajaId, montoReal, observaciones, incluirFueraCaja = false } = request.body as any
+            const {
+                cajaId,
+                montoReal,
+                observaciones,
+                incluirFueraCaja,
+                decisionFueraCaja,
+                confirmarConsumosPendientes,
+            } = request.body as any
 
             if (!cajaId || montoReal === undefined) {
                 return reply.code(400).send({ error: 'cajaId y montoReal son requeridos' })
             }
 
-            const empresaId = await getDefaultEmpresaId();
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             // Verificar que la caja esté abierta
             const cajas = await sql`
@@ -1067,6 +1427,8 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return reply.code(400).send({ error: 'La caja no está abierta' })
             }
 
+            const configuracion = await getOperativeConfig(empresaId, caja.punto_venta_id)
+
             const fueraCajaPendientes = await sql`
                 SELECT
                     COALESCE(SUM(total), 0) as total,
@@ -1076,8 +1438,71 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 AND empresa_id = ${empresaId}
                 AND estado = 'confirmada'
                 AND fuera_caja = true
-                AND conciliada_en IS NULL
+                AND (
+                    fuera_caja_estado = 'pendiente_caja'
+                    OR (fuera_caja_estado IS NULL AND conciliada_en IS NULL)
+                )
             `
+
+            const totalFueraCajaPendiente = Number(fueraCajaPendientes[0].total)
+            const cantidadFueraCajaPendiente = Number(fueraCajaPendientes[0].cantidad)
+
+            let incluirFueraCajaFinal = false
+            if (cantidadFueraCajaPendiente > 0) {
+                const politicaFueraCaja = configuracion.caja.manejo_fuera_caja_al_cerrar || 'preguntar'
+                if (decisionFueraCaja === 'incluir') {
+                    incluirFueraCajaFinal = true
+                } else if (decisionFueraCaja === 'excluir') {
+                    incluirFueraCajaFinal = false
+                } else if (typeof incluirFueraCaja === 'boolean') {
+                    incluirFueraCajaFinal = incluirFueraCaja
+                } else if (politicaFueraCaja === 'incluir') {
+                    incluirFueraCajaFinal = true
+                } else if (politicaFueraCaja === 'excluir') {
+                    incluirFueraCajaFinal = false
+                } else {
+                    return reply.code(409).send({
+                        error: 'CIERRE_REQUIERE_DECISION_FUERA_CAJA',
+                        mensaje: 'Hay ventas fuera de caja pendientes. Indica si deseas incluirlas en este cierre.',
+                        cantidadPendiente: cantidadFueraCajaPendiente,
+                        totalPendiente: totalFueraCajaPendiente,
+                    })
+                }
+            }
+
+            const consumosPendientes = await sql<{ cantidad: number; total_venta: number }[]>`
+                SELECT
+                    COUNT(*)::int as cantidad,
+                    COALESCE(SUM(total_venta), 0) as total_venta
+                FROM consumos_staff
+                WHERE punto_venta_id = ${caja.punto_venta_id}
+                  AND estado_liquidacion = 'pendiente'
+            `
+
+            const cantidadConsumosPendientes = Number(consumosPendientes[0].cantidad)
+            const totalConsumosPendientes = Number(consumosPendientes[0].total_venta)
+            const reglaConsumos = configuracion.consumos.al_cierre_sin_liquidar
+
+            if (cantidadConsumosPendientes > 0) {
+                if (reglaConsumos === 'no_permitir_cierre') {
+                    return reply.code(409).send({
+                        error: 'CIERRE_CONSUMOS_PENDIENTES_BLOQUEADO',
+                        mensaje: 'No se puede cerrar la caja con consumos pendientes del staff. Debes resolverlos primero.',
+                        cantidadPendiente: cantidadConsumosPendientes,
+                        totalPendiente: totalConsumosPendientes,
+                    })
+                }
+
+                if (!confirmarConsumosPendientes) {
+                    return reply.code(409).send({
+                        error: 'CIERRE_REQUIERE_CONFIRMACION_CONSUMOS',
+                        mensaje: 'Hay consumos pendientes. Al cerrar se aplicara la accion configurada automaticamente.',
+                        cantidadPendiente: cantidadConsumosPendientes,
+                        totalPendiente: totalConsumosPendientes,
+                        accionConfigurada: reglaConsumos,
+                    })
+                }
+            }
 
             // Calcular totales del día
             const totales = await sql`
@@ -1088,17 +1513,22 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     COALESCE(SUM(CASE WHEN medio_pago_nombre ILIKE '%tarjeta%' THEN total ELSE 0 END), 0) as total_tarjeta,
                     COALESCE(SUM(CASE WHEN medio_pago_nombre ILIKE '%transferencia%' THEN total ELSE 0 END), 0) as total_transferencia
                 FROM transacciones
-                WHERE caja_id = ${cajaId}
-                AND empresa_id = ${empresaId}
-                AND creado_en >= ${caja.fecha_apertura_actual}
+                WHERE empresa_id = ${empresaId}
                 AND estado = 'confirmada'
+                AND (
+                    (caja_id = ${cajaId} AND creado_en >= ${caja.fecha_apertura_actual})
+                    OR (
+                        punto_venta_id = ${caja.punto_venta_id}
+                        AND fuera_caja = true
+                        AND fuera_caja_estado = 'imputada_caja'
+                        AND conciliada_en >= ${caja.fecha_apertura_actual}
+                    )
+                )
             `
 
             const montoInicial = Number(caja.monto_inicial_actual)
-            const totalFueraCajaPendiente = Number(fueraCajaPendientes[0].total)
-            const cantidadFueraCajaPendiente = Number(fueraCajaPendientes[0].cantidad)
             const totalEfectivo = Number(totales[0].total_efectivo)
-            const montoEsperado = montoInicial + totalEfectivo + (incluirFueraCaja ? totalFueraCajaPendiente : 0)
+            const montoEsperado = montoInicial + totalEfectivo + (incluirFueraCajaFinal ? totalFueraCajaPendiente : 0)
             const diferencia = Number(montoReal) - montoEsperado
             const fechaOperativa = new Date(caja.fecha_apertura_actual ?? new Date()).toISOString().slice(0, 10)
 
@@ -1142,11 +1572,11 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     ${totalEfectivo},
                     ${totales[0].total_tarjeta},
                     ${totales[0].total_transferencia},
-                    ${Number(totales[0].cantidad_transacciones) + (incluirFueraCaja ? cantidadFueraCajaPendiente : 0)},
+                    ${Number(totales[0].cantidad_transacciones) + (incluirFueraCajaFinal ? cantidadFueraCajaPendiente : 0)},
                     ${observaciones || null},
-                    ${incluirFueraCaja},
-                    ${incluirFueraCaja ? cantidadFueraCajaPendiente : 0},
-                    ${incluirFueraCaja ? totalFueraCajaPendiente : 0}
+                    ${incluirFueraCajaFinal},
+                    ${incluirFueraCajaFinal ? cantidadFueraCajaPendiente : 0},
+                    ${incluirFueraCajaFinal ? totalFueraCajaPendiente : 0}
                 )
                 ON CONFLICT (punto_venta_id, caja_id, fecha_operativa)
                 DO UPDATE SET
@@ -1170,16 +1600,20 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 RETURNING id
             `
 
-            if (incluirFueraCaja && cantidadFueraCajaPendiente > 0) {
+            if (incluirFueraCajaFinal && cantidadFueraCajaPendiente > 0) {
                 await sql`
                     UPDATE transacciones
                     SET conciliada_en_cierre_id = ${cierre[0].id},
-                        conciliada_en = NOW()
+                        conciliada_en = NOW(),
+                        fuera_caja_estado = 'imputada_caja'
                     WHERE punto_venta_id = ${caja.punto_venta_id}
                     AND empresa_id = ${empresaId}
                     AND estado = 'confirmada'
                     AND fuera_caja = true
-                    AND conciliada_en IS NULL
+                    AND (
+                        fuera_caja_estado = 'pendiente_caja'
+                        OR (fuera_caja_estado IS NULL AND conciliada_en IS NULL)
+                    )
                 `
             }
 
@@ -1212,8 +1646,8 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     montoReal: Number(montoReal),
                     montoEsperado,
                     diferencia,
-                    incluirFueraCaja,
-                    fueraCajaConciliadas: incluirFueraCaja ? cantidadFueraCajaPendiente : 0,
+                    incluirFueraCaja: incluirFueraCajaFinal,
+                    fueraCajaConciliadas: incluirFueraCajaFinal ? cantidadFueraCajaPendiente : 0,
                     consumosAplicados: resultadoConsumos,
                 },
                 request
@@ -1223,8 +1657,9 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 success: true,
                 cierreId: cierre[0].id,
                 diferencia: diferencia,
-                fueraCajaConciliadas: incluirFueraCaja ? cantidadFueraCajaPendiente : 0,
-                totalFueraCajaConciliado: incluirFueraCaja ? totalFueraCajaPendiente : 0,
+                incluirFueraCaja: incluirFueraCajaFinal,
+                fueraCajaConciliadas: incluirFueraCajaFinal ? cantidadFueraCajaPendiente : 0,
+                totalFueraCajaConciliado: incluirFueraCajaFinal ? totalFueraCajaPendiente : 0,
                 consumosAplicados: resultadoConsumos,
             }
 
@@ -1254,7 +1689,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return reply.code(400).send({ error: 'cajaId es requerido' })
             }
 
-            const empresaId = await getDefaultEmpresaId();
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             const cajas = await sql`
                 SELECT * FROM cajas 
@@ -1280,10 +1715,17 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     COALESCE(SUM(CASE WHEN medio_pago_nombre ILIKE '%tarjeta%' THEN total ELSE 0 END), 0) as total_tarjeta,
                     COALESCE(SUM(CASE WHEN medio_pago_nombre ILIKE '%transferencia%' THEN total ELSE 0 END), 0) as total_transferencia
                 FROM transacciones
-                WHERE caja_id = ${cajaId}
-                AND empresa_id = ${empresaId}
-                AND creado_en >= ${caja.fecha_apertura_actual}
+                WHERE empresa_id = ${empresaId}
                 AND estado = 'confirmada'
+                AND (
+                    (caja_id = ${cajaId} AND creado_en >= ${caja.fecha_apertura_actual})
+                    OR (
+                        punto_venta_id = ${caja.punto_venta_id}
+                        AND fuera_caja = true
+                        AND fuera_caja_estado = 'imputada_caja'
+                        AND conciliada_en >= ${caja.fecha_apertura_actual}
+                    )
+                )
             `
 
             const montoInicial = Number(caja.monto_inicial_actual)
@@ -1299,7 +1741,10 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 AND empresa_id = ${empresaId}
                 AND estado = 'confirmada'
                 AND fuera_caja = true
-                AND conciliada_en IS NULL
+                AND (
+                    fuera_caja_estado = 'pendiente_caja'
+                    OR (fuera_caja_estado IS NULL AND conciliada_en IS NULL)
+                )
             `
 
             return {
@@ -1344,7 +1789,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             const limit = parseInt(query.limit) || 50
             const offset = parseInt(query.offset) || 0
 
-            const empresaId = await getDefaultEmpresaId();
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             try {
                 await procesarCierresAutomaticosPendientesEmpresa({
@@ -1405,7 +1850,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         try {
             const { id } = request.params as { id: string }
 
-            const empresaId = await getDefaultEmpresaId();
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
             const cierres = await sql`
                 SELECT 

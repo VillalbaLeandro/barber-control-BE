@@ -27,7 +27,8 @@ const liquidarConsumosSchema = z.object({
     consumoIds: z.array(z.string().uuid()).min(1),
     reglaAplicada: z.enum(['precio_venta', 'precio_costo', 'porcentaje', 'monto_fijo', 'perdonado']),
     valorRegla: z.number().optional(), // Porcentaje (0-100) o monto fijo
-    motivo: z.string().optional()
+    motivo: z.string().optional(),
+    medioPago: z.enum(['efectivo', 'tarjeta', 'transferencia']).optional(),
 })
 
 const cancelarRapidoConsumoSchema = z.object({
@@ -47,6 +48,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 usuarioId: staffId,
                 request,
                 motivo: 'registro_consumo_staff',
+                tipoOperacion: 'consumo',
                 accionCajaCerrada,
             })
 
@@ -55,6 +57,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     error: 'CAJA_CERRADA_REQUIERE_DECISION',
                     mensaje: resultadoCaja.mensajeDecision,
                     puedeAbrirCaja: resultadoCaja.puedeAbrirCaja,
+                    permitirFueraCaja: resultadoCaja.permitirFueraCaja,
                     accionSugerida: resultadoCaja.accionSugerida,
                 })
             }
@@ -195,7 +198,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
     // Liquidar consumos (cobrar/perdonar)
     fastify.post('/consumos/liquidar', async (request, reply) => {
         try {
-            const { consumoIds, reglaAplicada, valorRegla, motivo } = liquidarConsumosSchema.parse(request.body)
+            const { consumoIds, reglaAplicada, valorRegla, motivo, medioPago } = liquidarConsumosSchema.parse(request.body)
 
             const token = request.headers.authorization?.replace('Bearer ', '')
             const sesionAdmin = token ? await authService.verifySession(token) : null
@@ -288,21 +291,25 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 return { id: nuevas[0].id as string, abierta: Boolean(nuevas[0].abierta) }
             }
 
-            const obtenerMedioPagoEfectivo = async (tx: any, empresaId: string) => {
+            const obtenerMedioPagoPorNombre = async (
+                tx: any,
+                empresaId: string,
+                nombreMedioPago: 'efectivo' | 'tarjeta' | 'transferencia',
+            ) => {
                 const medios = await tx`
                     SELECT id, nombre
                     FROM medios_pago
-                    WHERE nombre ILIKE 'efectivo'
+                    WHERE nombre ILIKE ${nombreMedioPago}
                       AND (empresa_id = ${empresaId} OR empresa_id IS NULL)
                     ORDER BY CASE WHEN empresa_id = ${empresaId} THEN 0 ELSE 1 END, creado_en ASC
                     LIMIT 1
                 `
 
                 if (medios.length > 0) {
-                    return { id: medios[0].id as string, nombre: String(medios[0].nombre || 'efectivo') }
+                    return { id: medios[0].id as string, nombre: String(medios[0].nombre || nombreMedioPago) }
                 }
 
-                return { id: null as string | null, nombre: 'efectivo' }
+                return { id: null as string | null, nombre: nombreMedioPago }
             }
 
             let transaccionesGeneradas = 0
@@ -347,7 +354,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
                         let medio = cacheMedioPago.get(liq.empresaId)
                         if (!medio) {
-                            medio = await obtenerMedioPagoEfectivo(txn, liq.empresaId)
+                            medio = await obtenerMedioPagoPorNombre(txn, liq.empresaId, medioPago || 'efectivo')
                             cacheMedioPago.set(liq.empresaId, medio)
                         }
 
@@ -366,6 +373,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                                 medio_pago_id,
                                 medio_pago_nombre,
                                 fuera_caja,
+                                fuera_caja_estado,
                                 confirmado_en
                             )
                             VALUES (
@@ -380,6 +388,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                                 ${medio.id},
                                 ${medio.nombre},
                                 ${fueraCaja},
+                                ${fueraCaja ? 'pendiente_caja' : null},
                                 NOW()
                             )
                         `
@@ -417,6 +426,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     reglaAplicada,
                     valorRegla: valorRegla ?? null,
                     montoCobradoTotal: liquidaciones.reduce((sum, l) => sum + l.montoCobrado, 0),
+                    medioPago: medioPago || 'efectivo',
                     transaccionesGeneradas,
                     montoEnCaja,
                     montoFueraCaja,
@@ -576,6 +586,12 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
             if ((err as any)?.codigo === 'CAJA_CERRADA_BLOQUEADA') {
                 return reply.code(409).send({
                     error: 'CAJA_CERRADA_BLOQUEADA',
+                    mensaje: (err as Error).message,
+                })
+            }
+            if ((err as any)?.codigo === 'FUERA_CAJA_DESHABILITADO') {
+                return reply.code(409).send({
+                    error: 'FUERA_CAJA_DESHABILITADO',
                     mensaje: (err as Error).message,
                 })
             }

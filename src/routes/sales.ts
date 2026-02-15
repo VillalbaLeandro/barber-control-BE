@@ -17,6 +17,7 @@ const confirmSaleSchema = z.object({
     })).optional(),
     total: z.number(),
     metodo_pago: z.string(),
+    montoInicialApertura: z.number().min(0).optional(),
     accionCajaCerrada: z.enum(['abrir', 'fuera_caja']).optional(),
 })
 
@@ -80,14 +81,24 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 usuarioId: data.staff_id,
                 request,
                 motivo: 'confirmacion_venta',
+                tipoOperacion: 'venta',
                 accionCajaCerrada: data.accionCajaCerrada,
+                montoInicialApertura: data.montoInicialApertura,
             })
 
             if (resultadoCaja.requiereDecisionCajaCerrada) {
+                if (resultadoCaja.requiereMontoInicialPrimeraVenta) {
+                    return reply.code(409).send({
+                        error: 'CAJA_REQUIERE_MONTO_INICIAL_PRIMERA_VENTA',
+                        mensaje: resultadoCaja.mensajeDecision,
+                    })
+                }
+
                 return reply.code(409).send({
                     error: 'CAJA_CERRADA_REQUIERE_DECISION',
                     mensaje: resultadoCaja.mensajeDecision,
                     puedeAbrirCaja: resultadoCaja.puedeAbrirCaja,
+                    permitirFueraCaja: resultadoCaja.permitirFueraCaja,
                     accionSugerida: resultadoCaja.accionSugerida,
                 })
             }
@@ -124,6 +135,7 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                         medio_pago_id,
                         medio_pago_nombre,
                         fuera_caja,
+                        fuera_caja_estado,
                         confirmado_en
                     )
                     VALUES (
@@ -138,6 +150,7 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                         ${medioPagoId},
                         ${medioPagoNombre},
                         ${fueraCaja},
+                        ${fueraCaja ? 'pendiente_caja' : null},
                         NOW()
                     )
                     RETURNING id
@@ -192,7 +205,16 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     `
                 }
 
-                return { success: true, venta_id: transaccionId };
+                return {
+                    success: true,
+                    venta_id: transaccionId,
+                    contexto: {
+                        empresa_id: empresaId,
+                        punto_venta_id: data.punto_venta_id,
+                        caja_id: cajaId,
+                        fuera_caja: fueraCaja,
+                    },
+                };
             });
 
             await logAuditEvent({
@@ -220,6 +242,12 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
             if ((err as any)?.codigo === 'CAJA_CERRADA_BLOQUEADA') {
                 return reply.code(409).send({
                     error: 'CAJA_CERRADA_BLOQUEADA',
+                    mensaje: (err as Error).message,
+                })
+            }
+            if ((err as any)?.codigo === 'FUERA_CAJA_DESHABILITADO') {
+                return reply.code(409).send({
+                    error: 'FUERA_CAJA_DESHABILITADO',
                     mensaje: (err as Error).message,
                 })
             }
