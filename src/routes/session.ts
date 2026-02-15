@@ -1,6 +1,7 @@
 import { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import sql from '../db-admin.js'
+import { intentarCierreAutomaticoPuntoVenta } from '../utils/operativa-runtime.js'
 
 const setPuntoVentaSchema = z.object({
     staffId: z.string().uuid(),
@@ -40,6 +41,16 @@ const sessionRoutes: FastifyPluginAsync = async (fastify, opts) => {
             if (!puntoVenta[0].activo) {
                 console.warn('❌ Punto de venta inactivo:', puntoVenta[0].nombre);
                 return reply.code(400).send({ error: 'Punto de venta inactivo' })
+            }
+
+            try {
+                await intentarCierreAutomaticoPuntoVenta({
+                    puntoVentaId,
+                    request,
+                    motivo: 'session_punto_venta',
+                })
+            } catch (error) {
+                fastify.log.warn({ error, puntoVentaId }, 'No se pudo intentar cierre automático al seleccionar punto de venta')
             }
 
             // Registrar sesión (opcional - para auditoría)

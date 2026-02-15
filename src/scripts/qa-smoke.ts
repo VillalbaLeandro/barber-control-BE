@@ -189,6 +189,7 @@ async function runSmoke(): Promise<void> {
             staff_id: pinValidation.id,
             punto_venta_id: puntosVenta[0].id,
             ticketId: ticket.ticketId,
+            accionCajaCerrada: 'fuera_caja',
             total: Number(qaService.precio_venta || 0),
             metodo_pago: 'efectivo',
         })

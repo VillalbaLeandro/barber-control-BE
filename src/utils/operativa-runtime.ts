@@ -55,6 +55,10 @@ const formatearHoraLocal = (fecha: Date): string => {
   return texto.replace('.', ':')
 }
 
+const construirFechaCierreProgramadaLocal = (fechaOperativa: string, horaObjetivo: string): string => {
+  return `${fechaOperativa} ${horaObjetivo}:00`
+}
+
 const obtenerRolUsuario = async (usuarioId: string): Promise<RolUsuarioOperativo | null> => {
   const usuarios = await sql<RolUsuarioOperativo[]>`
     SELECT u.id, u.rol_id, lower(r.nombre) as rol_nombre
@@ -296,6 +300,7 @@ const ejecutarCierreAutomaticoCaja = async (parametros: {
   const incluirFueraCaja = true
   const montoEsperado = montoInicial + totalEfectivo + totalFueraCajaPendiente
   const montoReal = montoEsperado
+  const fechaCierreProgramadaLocal = construirFechaCierreProgramadaLocal(fechaOperativa, parametros.horaObjetivo)
 
   const cierre = await sql<{ id: string }[]>`
     INSERT INTO cierres_caja (
@@ -327,7 +332,7 @@ const ejecutarCierreAutomaticoCaja = async (parametros: {
       NULL,
       ${fechaOperativa},
       ${parametros.caja.fecha_apertura_actual},
-      NOW(),
+      (${fechaCierreProgramadaLocal}::timestamp AT TIME ZONE ${ZONA_HORARIA_OPERATIVA}),
       ${montoInicial},
       ${montoEsperado},
       ${montoReal},
@@ -416,6 +421,62 @@ const ejecutarCierreAutomaticoCaja = async (parametros: {
   })
 
   return true
+}
+
+export async function intentarCierreAutomaticoPuntoVenta(parametros: {
+  puntoVentaId: string
+  request?: FastifyRequest
+  motivo?: string
+}): Promise<boolean> {
+  const empresaId = await obtenerEmpresaIdPorPuntoVenta(parametros.puntoVentaId)
+  const configuracion = await getOperativeConfig(empresaId, parametros.puntoVentaId)
+  const caja = await obtenerCajaActivaPorPuntoVenta(empresaId, parametros.puntoVentaId)
+
+  if (
+    configuracion.caja.cierre_automatico_habilitado
+    && configuracion.caja.cierre_automatico_hora
+    && debeIntentarCierreAutomatico(caja, configuracion.caja.cierre_automatico_hora, new Date())
+  ) {
+    return ejecutarCierreAutomaticoCaja({
+      empresaId,
+      puntoVentaId: parametros.puntoVentaId,
+      caja,
+      horaObjetivo: configuracion.caja.cierre_automatico_hora,
+      reglaConsumos: configuracion.consumos.al_cierre_sin_liquidar,
+      request: parametros.request,
+    })
+  }
+
+  return false
+}
+
+export async function procesarCierresAutomaticosPendientesEmpresa(parametros: {
+  empresaId: string
+  request?: FastifyRequest
+  motivo?: string
+}) {
+  const puntosVenta = await sql<{ id: string }[]>`
+    SELECT id
+    FROM puntos_venta
+    WHERE empresa_id = ${parametros.empresaId}
+      AND activo = true
+    ORDER BY nombre ASC
+  `
+
+  let cierresEjecutados = 0
+  for (const puntoVenta of puntosVenta) {
+    const cerrado = await intentarCierreAutomaticoPuntoVenta({
+      puntoVentaId: puntoVenta.id,
+      request: parametros.request,
+      motivo: parametros.motivo,
+    })
+    if (cerrado) cierresEjecutados += 1
+  }
+
+  return {
+    totalPuntosVenta: puntosVenta.length,
+    cierresEjecutados,
+  }
 }
 
 export async function procesarOperativaCajaEnMovimiento(parametros: {

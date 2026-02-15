@@ -7,7 +7,11 @@ import { getDefaultEmpresaId, obtenerEmpresaIdDesdeUsuario } from '../utils/empr
 import { logAuditEvent } from '../utils/audit.js'
 import { buildPinFingerprint, generatePin4 } from '../utils/pin.js'
 import { DEFAULT_OPERATIVE_CONFIG, deepMerge, getOperativeConfig, normalizeConfigInput } from '../utils/config.js'
-import { aplicarPoliticaConsumosAlCerrarCaja } from '../utils/operativa-runtime.js'
+import {
+    aplicarPoliticaConsumosAlCerrarCaja,
+    intentarCierreAutomaticoPuntoVenta,
+    procesarCierresAutomaticosPendientesEmpresa,
+} from '../utils/operativa-runtime.js'
 
 const loginSchema = z.object({
     email: z.string().email().or(z.string()), // Aceptamos usuario o email
@@ -171,6 +175,17 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 request
             })
 
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(usuario.id)
+            try {
+                await procesarCierresAutomaticosPendientesEmpresa({
+                    empresaId,
+                    request,
+                    motivo: 'admin_login',
+                })
+            } catch (error) {
+                fastify.log.warn({ error }, 'No se pudieron procesar cierres automáticos pendientes en login')
+            }
+
             // Obtener info del rol
             const roles = await sqlAdmin`SELECT nombre FROM roles WHERE id = ${usuario.rol_id}`
             const rolNombre = roles.length > 0 ? roles[0].nombre : 'unknown'
@@ -258,6 +273,19 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         if (!session) {
             console.log('❌ Invalid token');
             return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const puntoVentaHeader = request.headers['x-punto-venta-id']
+        if (typeof puntoVentaHeader === 'string' && puntoVentaHeader.length > 0) {
+            try {
+                await intentarCierreAutomaticoPuntoVenta({
+                    puntoVentaId: puntoVentaHeader,
+                    request,
+                    motivo: 'admin_me',
+                })
+            } catch (error) {
+                fastify.log.warn({ error, puntoVentaId: puntoVentaHeader }, 'No se pudo intentar cierre automático en admin/me')
+            }
         }
 
         console.log('✅ Session valid for:', session.nombre);
@@ -901,6 +929,16 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             const empresaId = await getDefaultEmpresaId();
 
+            try {
+                await intentarCierreAutomaticoPuntoVenta({
+                    puntoVentaId,
+                    request,
+                    motivo: 'admin_caja_estado',
+                })
+            } catch (error) {
+                fastify.log.warn({ error, puntoVentaId }, 'No se pudo intentar cierre automático al consultar estado de caja')
+            }
+
             // Buscar caja activa del punto de venta
             const cajas = await sql`
                 SELECT * FROM cajas 
@@ -1307,6 +1345,16 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             const offset = parseInt(query.offset) || 0
 
             const empresaId = await getDefaultEmpresaId();
+
+            try {
+                await procesarCierresAutomaticosPendientesEmpresa({
+                    empresaId,
+                    request,
+                    motivo: 'admin_cierres_listado',
+                })
+            } catch (error) {
+                fastify.log.warn({ error, empresaId }, 'No se pudieron procesar cierres automáticos pendientes antes de listar cierres')
+            }
 
             const cierres = await sql`
                 SELECT 
