@@ -12,7 +12,6 @@ const registrarConsumoSchema = z.object({
     puntoVentaId: z.string().uuid(),
     accionCajaCerrada: z.enum(['abrir', 'fuera_caja']).optional(),
     items: z.array(z.object({
-        tipo: z.enum(['servicio', 'producto']),
         itemId: z.string().uuid(),
         nombre: z.string(),
         cantidad: z.number().positive(),
@@ -417,6 +416,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             await logAuditEvent({
                 empresaId: liquidaciones[0]?.empresaId || await getEmpresaIdFromRequest(request),
+                puntoVentaId: liquidaciones[0]?.puntoVentaId ?? null,
                 accion: 'consumo_liquidado',
                 entidad: 'consumo_staff',
                 metadata: {
@@ -567,6 +567,7 @@ const consumosRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             await logAuditEvent({
                 empresaId,
+                puntoVentaId,
                 usuarioId: staffId,
                 accion: 'consumo_cancelado_rapido',
                 entidad: 'consumo_staff',

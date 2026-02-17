@@ -9,7 +9,6 @@ const crearTicketSchema = z.object({
 })
 
 const agregarItemSchema = z.object({
-    tipo: z.enum(['servicio', 'producto']),
     itemId: z.string().uuid(),
     cantidad: z.number().positive(),
     precio: z.number().positive()
@@ -112,16 +111,13 @@ const ticketRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     items = []
                 }
 
-                const existingItemIndex = items.findIndex((item: any) =>
-                    item.tipo === itemData.tipo && item.itemId === itemData.itemId
-                )
+                const existingItemIndex = items.findIndex((item: any) => item.itemId === itemData.itemId)
 
                 if (existingItemIndex !== -1) {
                     items[existingItemIndex].cantidad += itemData.cantidad
                     items[existingItemIndex].subtotal = items[existingItemIndex].cantidad * items[existingItemIndex].precio
                 } else {
                     const nuevoItem = {
-                        tipo: itemData.tipo,
                         itemId: itemData.itemId,
                         cantidad: itemData.cantidad,
                         precio: itemData.precio,

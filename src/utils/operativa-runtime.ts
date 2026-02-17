@@ -218,6 +218,7 @@ const aplicarPoliticaConsumosPendientesAlCerrar = async (parametros: {
 
   await logAuditEvent({
     empresaId: parametros.empresaId,
+    puntoVentaId: parametros.puntoVentaId,
     usuarioId: parametros.usuarioId ?? null,
     accion: 'consumos_resueltos_por_cierre',
     entidad: 'cierre_caja',
@@ -328,9 +329,22 @@ const ejecutarCierreAutomaticoCaja = async (parametros: {
   const totalFueraCajaPendiente = Number(fueraCajaPendientes[0]?.total ?? 0)
   const cantidadFueraCajaPendiente = Number(fueraCajaPendientes[0]?.cantidad ?? 0)
   const totalEfectivo = Number(totales[0]?.total_efectivo ?? 0)
+  const movimientosCaja = await sql<{ total_ingresos: number; total_egresos: number }[]>`
+    SELECT
+      COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE 0 END), 0) as total_ingresos,
+      COALESCE(SUM(CASE WHEN tipo = 'egreso' THEN monto ELSE 0 END), 0) as total_egresos
+    FROM caja_movimientos
+    WHERE empresa_id = ${parametros.empresaId}
+      AND punto_venta_id = ${parametros.puntoVentaId}
+      AND caja_id = ${parametros.caja.id}
+      AND imputa_caja = true
+      AND creado_en >= ${parametros.caja.fecha_apertura_actual}
+  `
+  const totalIngresosCaja = Number(movimientosCaja[0]?.total_ingresos ?? 0)
+  const totalEgresosCaja = Number(movimientosCaja[0]?.total_egresos ?? 0)
   const montoInicial = Number(parametros.caja.monto_inicial_actual ?? 0)
   const incluirFueraCaja = true
-  const montoEsperado = montoInicial + totalEfectivo + totalFueraCajaPendiente
+  const montoEsperado = montoInicial + totalEfectivo + totalIngresosCaja - totalEgresosCaja + totalFueraCajaPendiente
   const montoReal = montoEsperado
   const fechaCierreProgramadaLocal = construirFechaCierreProgramadaLocal(fechaOperativa, parametros.horaObjetivo)
 
@@ -440,12 +454,15 @@ const ejecutarCierreAutomaticoCaja = async (parametros: {
 
   await logAuditEvent({
     empresaId: parametros.empresaId,
+    puntoVentaId: parametros.puntoVentaId,
     accion: 'caja_cierre_automatico',
     entidad: 'caja',
     entidadId: parametros.caja.id,
     metadata: {
       cierreId: cierre[0].id,
       horaObjetivo: parametros.horaObjetivo,
+      totalIngresosCaja,
+      totalEgresosCaja,
       totalFueraCajaConciliado: totalFueraCajaPendiente,
       consumosResueltos: resultadoConsumos,
     },
@@ -565,6 +582,7 @@ export async function procesarOperativaCajaEnMovimiento(parametros: {
 
     await logAuditEvent({
       empresaId,
+      puntoVentaId: parametros.puntoVentaId,
       usuarioId: parametros.usuarioId ?? null,
       accion: 'caja_apertura_automatica',
       entidad: 'caja',

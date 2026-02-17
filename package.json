@@ -11,9 +11,19 @@
     "migrate:020": "tsx src/scripts/migrate-020.ts",
     "migrate:021": "tsx src/scripts/migrate-021.ts",
     "migrate:022": "tsx src/scripts/migrate-022.ts",
+    "migrate:023": "tsx src/scripts/migrate-023.ts",
+    "migrate:024": "tsx src/scripts/migrate-024.ts",
+    "migrate:025": "tsx src/scripts/migrate-025.ts",
+    "migrate:026": "tsx src/scripts/migrate-026.ts",
+    "migrate:027": "tsx src/scripts/migrate-027.ts",
+    "migrate:028": "tsx src/scripts/migrate-028.ts",
     "qa:smoke": "tsx src/scripts/qa-smoke.ts",
+    "qa:categorias-pv": "tsx src/scripts/qa-categorias-pv.ts",
     "qa:rls": "tsx src/scripts/qa-rls.ts",
-    "qa:regression": "npm run build && npm run qa:smoke"
+    "cleanup:qa-data": "tsx src/scripts/cleanup-qa-data.ts",
+    "qa:regression": "npm run build && npm run qa:smoke",
+    "test": "jest",
+    "test:watch": "jest --watch"
   },
   "keywords": [],
   "author": "",
@@ -29,8 +39,11 @@
   },
   "devDependencies": {
     "@types/dotenv": "^6.1.1",
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.13.1",
+    "jest": "^30.2.0",
     "nodemon": "^3.1.11",
+    "ts-jest": "^29.4.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

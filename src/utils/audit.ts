@@ -1,8 +1,9 @@
 import type { FastifyRequest } from 'fastify'
-import sql from '../db.js'
+import sql from '../db-admin.js'
 
 type AuditInput = {
     empresaId?: string | null
+    puntoVentaId?: string | null
     usuarioId?: string | null
     accion: string
     entidad?: string | null
@@ -16,6 +17,7 @@ export async function logAuditEvent(input: AuditInput): Promise<void> {
         await sql`
             INSERT INTO auditoria_eventos (
                 empresa_id,
+                punto_venta_id,
                 usuario_id,
                 accion,
                 entidad,
@@ -26,6 +28,7 @@ export async function logAuditEvent(input: AuditInput): Promise<void> {
             )
             VALUES (
                 ${input.empresaId ?? null},
+                ${input.puntoVentaId ?? null},
                 ${input.usuarioId ?? null},
                 ${input.accion},
                 ${input.entidad ?? null},

@@ -4,13 +4,13 @@ import sql from '../db-admin.js'
 import { getDefaultEmpresaId, obtenerEmpresaIdPorPuntoVenta } from '../utils/empresa.js'
 import { logAuditEvent } from '../utils/audit.js'
 import { procesarOperativaCajaEnMovimiento } from '../utils/operativa-runtime.js'
+import { reintegrarStockPorAnulacion } from '../utils/stock.js'
 
 const confirmSaleSchema = z.object({
     staff_id: z.string().uuid(),
     punto_venta_id: z.string().uuid(),
     ticketId: z.string().uuid().optional(),
     items: z.array(z.object({
-        tipo: z.enum(['servicio', 'producto']),
         id: z.string(), // Changed to string (UUID)
         cantidad: z.number(),
         precio: z.number()
@@ -161,8 +161,7 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 // 5. Guardar Detalles de Transacción
                 for (const item of itemsToSave) {
                     const itemAny = item as any;
-                    const nombreItem = itemAny.nombre || itemAny.name || (itemAny.tipo === 'servicio' ? 'Servicio' : 'Producto');
-                    const tipoItem = itemAny.tipo; // 'servicio' o 'producto'
+                    const nombreItem = itemAny.nombre || itemAny.name || 'Item';
                     const itemId = itemAny.itemId || itemAny.id; // UUID
                     const cantidad = Number(itemAny.cantidad);
                     const precio = Number(itemAny.precio);
@@ -184,9 +183,9 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                         VALUES (
                             ${transaccionId},
                             ${itemId},
-                            ${tipoItem},
-                            ${tipoItem === 'servicio' ? itemId : null},
-                            ${tipoItem === 'producto' ? itemId : null},
+                            ${null},
+                            ${null},
+                            ${null},
                             ${nombreItem},
                             ${cantidad},
                             ${precio},
@@ -219,6 +218,7 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             await logAuditEvent({
                 empresaId,
+                puntoVentaId: data.punto_venta_id,
                 usuarioId: data.staff_id,
                 accion: 'venta_confirmada',
                 entidad: 'transaccion',
@@ -298,8 +298,14 @@ const salesRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 WHERE id = ${id}
             `
 
+            await reintegrarStockPorAnulacion({
+                transaccionId: id,
+                puntoVentaId: data.punto_venta_id,
+            })
+
             await logAuditEvent({
                 empresaId,
+                puntoVentaId: data.punto_venta_id,
                 usuarioId: data.staff_id,
                 accion: 'venta_cancelada_rapida',
                 entidad: 'transaccion',

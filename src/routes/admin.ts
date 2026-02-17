@@ -12,6 +12,7 @@ import {
     intentarCierreAutomaticoPuntoVenta,
     procesarCierresAutomaticosPendientesEmpresa,
 } from '../utils/operativa-runtime.js'
+import { reintegrarStockPorAnulacion } from '../utils/stock.js'
 
 const loginSchema = z.object({
     email: z.string().email().or(z.string()), // Aceptamos usuario o email
@@ -23,13 +24,155 @@ const createStaffSchema = z.object({
     rolOperativo: z.enum(['barbero', 'encargado', 'admin']).default('barbero')
 })
 
+const updateStaffSchema = z.object({
+    nombreCompleto: z.string().min(2).max(120).optional(),
+    rolOperativo: z.enum(['barbero', 'encargado', 'admin']).optional(),
+})
+
+const changeStaffStatusSchema = z.object({
+    activo: z.boolean(),
+})
+
 const cancelarVentaSchema = z.object({
     motivo: z.string().max(500).optional()
 })
 
-const actualizarPuntoVentaSchema = z.object({
+const crearPuntoVentaSchema = z.object({
+    nombre: z.string().min(2).max(120),
+    codigo: z.string().min(2).max(40).optional(),
     direccion: z.string().max(255).optional(),
     telefono_contacto: z.string().max(30).optional(),
+})
+
+const actualizarPuntoVentaSchema = z.object({
+    nombre: z.string().min(2).max(120).optional(),
+    codigo: z.string().min(2).max(40).optional(),
+    direccion: z.string().max(255).optional(),
+    telefono_contacto: z.string().max(30).optional(),
+})
+
+const estadoPuntoVentaSchema = z.object({
+    activo: z.boolean(),
+})
+
+const categoriaDefaultsSchema = z.object({
+    maneja_stock: z.boolean().optional(),
+    usa_costo: z.boolean().optional(),
+    requiere_duracion: z.boolean().optional(),
+    permite_consumo_staff: z.boolean().optional(),
+    tipo_cantidad: z.enum(['entero', 'decimal']).optional(),
+})
+
+const categoriasListadoSchema = z.object({
+    puntoVentaId: z.string().uuid().optional(),
+    incluirInactivas: z.enum(['true', 'false']).optional(),
+})
+
+const crearCategoriaSchema = z.object({
+    nombre: z.string().min(2).max(120),
+    ordenUiBase: z.number().int().min(0).optional(),
+    defaultsConfig: categoriaDefaultsSchema.optional(),
+    scope: z.enum(['solo_pv', 'pvs', 'todos_pv']).default('todos_pv'),
+    puntoVentaId: z.string().uuid().optional(),
+    puntoVentaIds: z.array(z.string().uuid()).optional(),
+})
+
+const actualizarCategoriaSchema = z.object({
+    nombre: z.string().min(2).max(120).optional(),
+    ordenUiBase: z.number().int().min(0).optional(),
+    defaultsConfig: categoriaDefaultsSchema.optional(),
+})
+
+const estadoCategoriaSchema = z.object({
+    activaBase: z.boolean(),
+})
+
+const categoriaPvUpdateSchema = z.object({
+    puntoVentaId: z.string().uuid(),
+    activaEnPv: z.boolean().optional(),
+    ordenUiPv: z.number().int().min(0).nullable().optional(),
+})
+
+const categoriaAplicarSchema = z.object({
+    scope: z.enum(['todos_pv', 'pvs']),
+    puntoVentaIds: z.array(z.string().uuid()).optional(),
+    activaEnPv: z.boolean().default(true),
+})
+
+const catalogoScopeSchema = z.object({
+    activo: z.enum(['true', 'false']).optional(),
+    puntoVentaId: z.string().uuid().optional(),
+    categoriaId: z.string().uuid().optional(),
+})
+
+const crearCatalogoItemSchema = z.object({
+    nombre: z.string().min(2).max(120),
+    categoria: z.string().max(120).optional(),
+    categoriaId: z.string().uuid().nullable().optional(),
+    precio_venta: z.number().min(0),
+    activo: z.boolean().optional(),
+    orden_ui: z.number().int().min(0).optional(),
+    costo: z.number().min(0).optional(),
+    maneja_stock: z.boolean().optional(),
+    stock_actual: z.number().min(0).optional(),
+    stock_minimo: z.number().min(0).optional(),
+    permite_consumo_staff: z.boolean().optional(),
+    tipo_cantidad: z.enum(['entero', 'decimal']).optional(),
+    duracion_min: z.number().int().min(1).max(600).nullable().optional(),
+    scope: z.enum(['solo_pv', 'todos_pv_activos']).default('todos_pv_activos'),
+    puntoVentaId: z.string().uuid().optional(),
+})
+
+const actualizarCatalogoItemSchema = crearCatalogoItemSchema.partial().extend({
+    nombre: z.string().min(2).max(120).optional(),
+})
+
+const estadoCatalogoItemSchema = z.object({
+    activo: z.boolean(),
+})
+
+const catalogoPvOpcionesSchema = z.object({
+    excludePuntoVentaId: z.string().uuid().optional(),
+})
+
+const inventarioAjusteSchema = z.object({
+    itemId: z.string().uuid(),
+    puntoVentaId: z.string().uuid(),
+    nuevoStock: z.number().min(0),
+    motivo: z.string().min(3).max(300),
+})
+
+const inventarioCompraSchema = z.object({
+    itemId: z.string().uuid(),
+    puntoVentaId: z.string().uuid(),
+    cantidad: z.number().positive(),
+    costoUnitario: z.number().min(0).optional(),
+    costoTotal: z.number().min(0).optional(),
+    proveedor: z.string().max(160).optional(),
+    referencia: z.string().max(160).optional(),
+    descripcion: z.string().max(300).optional(),
+    imputaCaja: z.boolean().default(true),
+})
+
+const inventarioCompraConAltaPvSchema = z.object({
+    itemId: z.string().uuid(),
+    puntoVentaDestinoId: z.string().uuid(),
+    cantidad: z.number().positive(),
+    costoUnitario: z.number().min(0).optional(),
+    costoTotal: z.number().min(0).optional(),
+    proveedor: z.string().max(160).optional(),
+    referencia: z.string().max(160).optional(),
+    descripcion: z.string().max(300).optional(),
+    imputaCaja: z.boolean().default(true),
+    modoConfiguracion: z.enum(['copiar', 'manual']),
+    puntoVentaOrigenId: z.string().uuid().optional(),
+    configuracionManual: z.object({
+        precioVentaPv: z.number().min(0),
+        costo: z.number().min(0),
+        stockMinimoPv: z.number().min(0).default(0),
+        permiteConsumoStaff: z.boolean().default(true),
+        ordenUiPv: z.number().int().min(0).default(0),
+    }).optional(),
 })
 
 const operativaScopeSchema = z.object({
@@ -118,6 +261,123 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         }
 
         return fallback[0].id as string
+    }
+
+    const assertPuntoVentaEmpresa = async (empresaId: string, puntoVentaId: string) => {
+        const rows = await sqlAdmin`
+            SELECT id
+            FROM puntos_venta
+            WHERE id = ${puntoVentaId}
+              AND empresa_id = ${empresaId}
+            LIMIT 1
+        `
+
+        if (rows.length === 0) {
+            const error = new Error('El punto de venta no pertenece a la empresa del usuario')
+            ;(error as any).codigo = 'PUNTO_VENTA_FUERA_EMPRESA'
+            throw error
+        }
+    }
+
+    const normalizeCategoriaNombre = (value: string) => value.trim().replace(/\s+/g, ' ')
+    const categoriaNombreNormalizado = (value: string) => normalizeCategoriaNombre(value).toLowerCase()
+
+    const assertCategoriaEmpresa = async (empresaId: string, categoriaId: string) => {
+        const rows = await sqlAdmin`
+            SELECT id
+            FROM categorias_catalogo
+            WHERE id = ${categoriaId}
+              AND empresa_id = ${empresaId}
+            LIMIT 1
+        `
+
+        if (rows.length === 0) {
+            const error = new Error('La categoria no pertenece a la empresa del usuario')
+            ;(error as any).codigo = 'CATEGORIA_FUERA_EMPRESA'
+            throw error
+        }
+    }
+
+    const getCategoriaDefaults = async (empresaId: string, categoriaId: string | null | undefined) => {
+        if (!categoriaId) return null
+
+        const rows = await sqlAdmin`
+            SELECT id, defaults_config
+            FROM categorias_catalogo
+            WHERE id = ${categoriaId}
+              AND empresa_id = ${empresaId}
+            LIMIT 1
+        `
+
+        if (rows.length === 0) return null
+
+        return {
+            id: rows[0].id as string,
+            defaultsConfig: (rows[0].defaults_config ?? {}) as Record<string, unknown>,
+        }
+    }
+
+    const resolveCategoriaIdFromInput = async (
+        tx: any,
+        empresaId: string,
+        categoriaIdInput?: string | null,
+        categoriaTextoInput?: string | null,
+    ): Promise<string | null> => {
+        if (categoriaIdInput === null) return null
+
+        if (categoriaIdInput) {
+            const rows = await tx`
+                SELECT id
+                FROM categorias_catalogo
+                WHERE id = ${categoriaIdInput}
+                  AND empresa_id = ${empresaId}
+                LIMIT 1
+            `
+            if (rows.length === 0) {
+                const error = new Error('La categoria no pertenece a la empresa del usuario')
+                ;(error as any).codigo = 'CATEGORIA_FUERA_EMPRESA'
+                throw error
+            }
+            return rows[0].id as string
+        }
+
+        const categoriaTexto = categoriaTextoInput ? normalizeCategoriaNombre(categoriaTextoInput) : ''
+        if (!categoriaTexto) return null
+
+        const nombreNormalizado = categoriaNombreNormalizado(categoriaTexto)
+        const existentes = await tx`
+            SELECT id
+            FROM categorias_catalogo
+            WHERE empresa_id = ${empresaId}
+              AND nombre_normalizado = ${nombreNormalizado}
+            LIMIT 1
+        `
+
+        if (existentes.length > 0) {
+            return existentes[0].id as string
+        }
+
+        const [creada] = await tx`
+            INSERT INTO categorias_catalogo (
+                empresa_id,
+                nombre,
+                nombre_normalizado,
+                activa_base,
+                orden_ui_base,
+                defaults_config
+            )
+            VALUES (
+                ${empresaId},
+                ${categoriaTexto},
+                ${nombreNormalizado},
+                true,
+                0,
+                '{}'::jsonb
+            )
+            RETURNING id
+        `
+
+        return creada.id as string
     }
 
     const generateUniquePin = async (empresaId: string): Promise<string> => {
@@ -384,6 +644,230 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             if (err instanceof z.ZodError) {
                 return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
             }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.get('/admin/staff', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            const staff = await sqlAdmin`
+                SELECT
+                    u.id,
+                    u.nombre_completo as nombre,
+                    COALESCE(lower(r.nombre), 'barbero') as rol,
+                    u.activo,
+                    u.bloqueado_hasta,
+                    u.actualizado_en
+                FROM usuarios u
+                LEFT JOIN roles r ON r.id = u.rol_id
+                WHERE u.empresa_id = ${empresaId}
+                ORDER BY u.nombre_completo ASC
+            `
+
+            return staff
+        } catch (err) {
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.put('/admin/staff/:id', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const { id } = request.params as { id: string }
+            const payload = updateStaffSchema.parse(request.body ?? {})
+            if (!payload.nombreCompleto && !payload.rolOperativo) {
+                return reply.code(400).send({ error: 'Debes enviar al menos un campo para actualizar' })
+            }
+
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const usuarios = await sqlAdmin`
+                SELECT id, nombre_completo, rol_id, activo
+                FROM usuarios
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                LIMIT 1
+            `
+            if (usuarios.length === 0) {
+                return reply.code(404).send({ error: 'Usuario no encontrado' })
+            }
+
+            const rolId = payload.rolOperativo
+                ? await resolveRoleId(empresaId, payload.rolOperativo)
+                : usuarios[0].rol_id
+
+            const nombre = payload.nombreCompleto?.trim() || usuarios[0].nombre_completo
+
+            const [updated] = await sqlAdmin`
+                UPDATE usuarios
+                SET nombre_completo = ${nombre},
+                    rol_id = ${rolId},
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                RETURNING id, nombre_completo as nombre, activo, bloqueado_hasta
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'staff_actualizado',
+                entidad: 'usuario',
+                entidadId: id,
+                metadata: {
+                    nombreCompleto: nombre,
+                    rolOperativo: payload.rolOperativo || null,
+                },
+                request,
+            })
+
+            return updated
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.put('/admin/staff/:id/estado', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const { id } = request.params as { id: string }
+            const { activo } = changeStaffStatusSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const [updated] = await sqlAdmin`
+                UPDATE usuarios
+                SET activo = ${activo},
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                RETURNING id, nombre_completo as nombre, activo, bloqueado_hasta
+            `
+
+            if (!updated) {
+                return reply.code(404).send({ error: 'Usuario no encontrado' })
+            }
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: activo ? 'staff_activado' : 'staff_inactivado',
+                entidad: 'usuario',
+                entidadId: id,
+                metadata: { activo },
+                request,
+            })
+
+            return updated
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'CATEGORIA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'CATEGORIA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.post('/admin/staff/:id/reset-pin', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const { id } = request.params as { id: string }
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const usuarios = await sqlAdmin`
+                SELECT id, nombre_completo
+                FROM usuarios
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                LIMIT 1
+            `
+            if (usuarios.length === 0) {
+                return reply.code(404).send({ error: 'Usuario no encontrado' })
+            }
+
+            const pin = await generateUniquePin(empresaId)
+            const pinFingerprint = buildPinFingerprint(empresaId, pin)
+            const pinHash = await authService.hashPassword(pin)
+
+            await sqlAdmin`
+                UPDATE usuarios
+                SET pin_hash = ${pinHash},
+                    pin_fingerprint = ${pinFingerprint},
+                    intentos_fallidos = 0,
+                    bloqueado_hasta = NULL,
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'staff_pin_reasignado',
+                entidad: 'usuario',
+                entidadId: id,
+                metadata: { nombreCompleto: usuarios[0].nombre_completo },
+                request,
+            })
+
+            return {
+                id,
+                nombreCompleto: usuarios[0].nombre_completo,
+                pin,
+            }
+        } catch (err) {
             fastify.log.error(err)
             return reply.code(500).send({ error: 'Error interno de servidor' })
         }
@@ -417,7 +901,75 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         }
     })
 
-    // Admin: Actualizar datos de contacto del punto de venta
+    // Admin: Crear punto de venta
+    fastify.post('/admin/puntos-venta', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const payload = crearPuntoVentaSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const [created] = await sql`
+                INSERT INTO puntos_venta (
+                    empresa_id,
+                    nombre,
+                    codigo,
+                    direccion,
+                    telefono_contacto,
+                    activo,
+                    creado_en,
+                    actualizado_en
+                )
+                VALUES (
+                    ${empresaId},
+                    ${payload.nombre.trim()},
+                    ${payload.codigo?.trim() || null},
+                    ${payload.direccion?.trim() || null},
+                    ${payload.telefono_contacto?.trim() || null},
+                    true,
+                    NOW(),
+                    NOW()
+                )
+                RETURNING id, nombre, codigo, direccion, telefono_contacto, activo, creado_en, actualizado_en
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'punto_venta_creado',
+                entidad: 'punto_venta',
+                entidadId: created.id,
+                metadata: {
+                    nombre: created.nombre,
+                    codigo: created.codigo,
+                },
+                request,
+            })
+
+            return created
+        } catch (err: any) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+
+            if (err?.code === '23505') {
+                return reply.code(409).send({ error: 'CODIGO_PUNTO_VENTA_DUPLICADO', mensaje: 'Ya existe un punto de venta con ese código.' })
+            }
+
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    // Admin: Actualizar punto de venta
     fastify.put('/admin/puntos-venta/:id', async (request, reply) => {
         const token = request.headers.authorization?.replace('Bearer ', '')
         if (!token) {
@@ -432,19 +984,38 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         try {
             const { id } = request.params as { id: string }
             const payload = actualizarPuntoVentaSchema.parse(request.body ?? {})
+            if (!payload.nombre && !payload.codigo && payload.direccion === undefined && payload.telefono_contacto === undefined) {
+                return reply.code(400).send({ error: 'Debes enviar al menos un campo para actualizar' })
+            }
             const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
 
+            const current = await sql`
+                SELECT id, nombre, codigo
+                FROM puntos_venta
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (current.length === 0) {
+                return reply.code(404).send({ error: 'Punto de venta no encontrado' })
+            }
+
+            const nombre = payload.nombre?.trim() || current[0].nombre
+            const codigo = payload.codigo?.trim() || current[0].codigo || null
             const direccion = payload.direccion?.trim() || null
             const telefono = payload.telefono_contacto?.trim() || null
 
             const updated = await sql`
                 UPDATE puntos_venta
-                SET direccion = ${direccion},
+                SET nombre = ${nombre},
+                    codigo = ${codigo},
+                    direccion = ${direccion},
                     telefono_contacto = ${telefono},
                     actualizado_en = NOW()
                 WHERE id = ${id}
                 AND empresa_id = ${empresaId}
-                RETURNING id, nombre, codigo, direccion, telefono_contacto, activo, actualizado_en
+                RETURNING id, nombre, codigo, direccion, telefono_contacto, activo, creado_en, actualizado_en
             `
 
             if (updated.length === 0) {
@@ -458,6 +1029,8 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 entidad: 'punto_venta',
                 entidadId: id,
                 metadata: {
+                    nombre,
+                    codigo,
                     direccion,
                     telefono_contacto: telefono,
                 },
@@ -465,9 +1038,1740 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             })
 
             return updated[0]
+        } catch (err: any) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+
+            if (err?.code === '23505') {
+                return reply.code(409).send({ error: 'CODIGO_PUNTO_VENTA_DUPLICADO', mensaje: 'Ya existe un punto de venta con ese código.' })
+            }
+
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    // Admin: Activar/Inactivar punto de venta
+    fastify.put('/admin/puntos-venta/:id/estado', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const { id } = request.params as { id: string }
+            const { activo } = estadoPuntoVentaSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const [puntoVentaActual] = await sql`
+                SELECT id, activo
+                FROM puntos_venta
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (!puntoVentaActual) {
+                return reply.code(404).send({ error: 'Punto de venta no encontrado' })
+            }
+
+            if (!activo) {
+                if (puntoVentaActual.activo) {
+                    const otrosPuntosActivos = await sql`
+                        SELECT id
+                        FROM puntos_venta
+                        WHERE empresa_id = ${empresaId}
+                          AND activo = true
+                          AND id <> ${id}
+                        LIMIT 1
+                    `
+
+                    if (otrosPuntosActivos.length === 0) {
+                        return reply.code(409).send({
+                            error: 'ULTIMO_PUNTO_VENTA_ACTIVO',
+                            mensaje: 'No se puede inactivar el último punto de venta activo de la empresa.',
+                        })
+                    }
+                }
+
+                const cajasAbiertas = await sql`
+                    SELECT id
+                    FROM cajas
+                    WHERE empresa_id = ${empresaId}
+                      AND punto_venta_id = ${id}
+                      AND activa = true
+                      AND abierta = true
+                    LIMIT 1
+                `
+
+                if (cajasAbiertas.length > 0) {
+                    return reply.code(409).send({
+                        error: 'PUNTO_VENTA_TIENE_CAJA_ABIERTA',
+                        mensaje: 'No se puede inactivar el punto de venta porque tiene una caja abierta. Cierra la caja primero.',
+                    })
+                }
+            }
+
+            const [updated] = await sql`
+                UPDATE puntos_venta
+                SET activo = ${activo},
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                RETURNING id, nombre, codigo, direccion, telefono_contacto, activo, creado_en, actualizado_en
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: activo ? 'punto_venta_activado' : 'punto_venta_inactivado',
+                entidad: 'punto_venta',
+                entidadId: id,
+                metadata: { activo },
+                request,
+            })
+
+            return updated
         } catch (err) {
             if (err instanceof z.ZodError) {
                 return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.get('/admin/categorias', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { puntoVentaId, incluirInactivas } = categoriasListadoSchema.parse(request.query ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            if (puntoVentaId) {
+                await assertPuntoVentaEmpresa(empresaId, puntoVentaId)
+            }
+
+            const categorias = await sqlAdmin`
+                SELECT
+                    c.id,
+                    c.nombre,
+                    c.activa_base,
+                    c.orden_ui_base,
+                    c.defaults_config,
+                    c.creado_en,
+                    c.actualizado_en,
+                    cpv.punto_venta_id,
+                    cpv.activa_en_pv,
+                    cpv.orden_ui_pv,
+                    COALESCE(cpv.activa_en_pv, c.activa_base) AS activa_efectiva,
+                    COALESCE(cpv.orden_ui_pv, c.orden_ui_base) AS orden_ui_efectivo
+                FROM categorias_catalogo c
+                LEFT JOIN categorias_punto_venta cpv
+                    ON cpv.categoria_id = c.id
+                   AND cpv.punto_venta_id = ${puntoVentaId ?? null}
+                WHERE c.empresa_id = ${empresaId}
+                  ${incluirInactivas === 'false' ? sqlAdmin`AND COALESCE(cpv.activa_en_pv, c.activa_base) = true` : sqlAdmin``}
+                ORDER BY COALESCE(cpv.orden_ui_pv, c.orden_ui_base) ASC, c.nombre ASC
+            `
+
+            return categorias.map((c: any) => ({
+                id: c.id,
+                nombre: c.nombre,
+                activaBase: Boolean(c.activa_base),
+                ordenUiBase: Number(c.orden_ui_base ?? 0),
+                defaultsConfig: c.defaults_config ?? {},
+                puntoVentaId: c.punto_venta_id ?? null,
+                activaEnPv: c.activa_en_pv === null ? null : Boolean(c.activa_en_pv),
+                ordenUiPv: c.orden_ui_pv === null ? null : Number(c.orden_ui_pv),
+                activaEfectiva: Boolean(c.activa_efectiva),
+                ordenUiEfectivo: Number(c.orden_ui_efectivo ?? 0),
+                creadoEn: c.creado_en,
+                actualizadoEn: c.actualizado_en,
+            }))
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.post('/admin/categorias', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const payload = crearCategoriaSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            const nombre = normalizeCategoriaNombre(payload.nombre)
+            const nombreNormalizado = categoriaNombreNormalizado(payload.nombre)
+
+            let puntoVentaIds: string[] = []
+            if (payload.scope === 'solo_pv') {
+                if (!payload.puntoVentaId) {
+                    return reply.code(400).send({ error: 'puntoVentaId es requerido para scope solo_pv' })
+                }
+                await assertPuntoVentaEmpresa(empresaId, payload.puntoVentaId)
+                puntoVentaIds = [payload.puntoVentaId]
+            } else if (payload.scope === 'pvs') {
+                if (!payload.puntoVentaIds || payload.puntoVentaIds.length === 0) {
+                    return reply.code(400).send({ error: 'puntoVentaIds es requerido para scope pvs' })
+                }
+                for (const pvId of payload.puntoVentaIds) {
+                    await assertPuntoVentaEmpresa(empresaId, pvId)
+                }
+                puntoVentaIds = [...new Set(payload.puntoVentaIds)]
+            } else {
+                const pvs = await sqlAdmin`
+                    SELECT id
+                    FROM puntos_venta
+                    WHERE empresa_id = ${empresaId}
+                      AND activo = true
+                `
+                puntoVentaIds = pvs.map((pv: any) => pv.id as string)
+            }
+
+            const created = await sqlAdmin.begin(async (tx: any) => {
+                const exists = await tx`
+                    SELECT id
+                    FROM categorias_catalogo
+                    WHERE empresa_id = ${empresaId}
+                      AND nombre_normalizado = ${nombreNormalizado}
+                    LIMIT 1
+                `
+
+                if (exists.length > 0) {
+                    const error = new Error('Ya existe una categoria con ese nombre')
+                    ;(error as any).codigo = 'CATEGORIA_DUPLICADA'
+                    throw error
+                }
+
+                const [categoria] = await tx`
+                    INSERT INTO categorias_catalogo (
+                        empresa_id,
+                        nombre,
+                        nombre_normalizado,
+                        activa_base,
+                        orden_ui_base,
+                        defaults_config
+                    )
+                    VALUES (
+                        ${empresaId},
+                        ${nombre},
+                        ${nombreNormalizado},
+                        true,
+                        ${payload.ordenUiBase ?? 0},
+                        ${JSON.stringify(payload.defaultsConfig ?? {})}::jsonb
+                    )
+                    RETURNING id, nombre, activa_base, orden_ui_base, defaults_config, creado_en, actualizado_en
+                `
+
+                if (puntoVentaIds.length > 0) {
+                    const puntoVentaArray = tx.array(puntoVentaIds as any)
+                    await tx`
+                        INSERT INTO categorias_punto_venta (
+                            categoria_id,
+                            punto_venta_id,
+                            activa_en_pv,
+                            orden_ui_pv
+                        )
+                        SELECT
+                            ${categoria.id},
+                            pv.id,
+                            true,
+                            NULL
+                        FROM puntos_venta pv
+                        WHERE pv.id = ANY(${puntoVentaArray}::uuid[])
+                          AND pv.empresa_id = ${empresaId}
+                        ON CONFLICT (categoria_id, punto_venta_id) DO NOTHING
+                    `
+                }
+
+                return categoria
+            })
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'categoria_creada',
+                entidad: 'categoria_catalogo',
+                entidadId: created.id,
+                metadata: {
+                    nombre: created.nombre,
+                    scope: payload.scope,
+                    puntoVentaIds,
+                    defaultsConfig: payload.defaultsConfig ?? {},
+                },
+                request,
+            })
+
+            return {
+                id: created.id,
+                nombre: created.nombre,
+                activaBase: Boolean(created.activa_base),
+                ordenUiBase: Number(created.orden_ui_base ?? 0),
+                defaultsConfig: created.defaults_config ?? {},
+                scope: payload.scope,
+                puntoVentaIds,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
+            if ((err as any)?.codigo === 'CATEGORIA_DUPLICADA') {
+                return reply.code(409).send({ error: 'CATEGORIA_DUPLICADA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.put('/admin/categorias/:id', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { id } = request.params as { id: string }
+            const payload = actualizarCategoriaSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const rows = await sqlAdmin`
+                SELECT id, nombre, nombre_normalizado, orden_ui_base, defaults_config
+                FROM categorias_catalogo
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (rows.length === 0) {
+                return reply.code(404).send({ error: 'Categoria no encontrada' })
+            }
+
+            const current = rows[0]
+            const nextNombre = payload.nombre ? normalizeCategoriaNombre(payload.nombre) : current.nombre
+            const nextNombreNormalizado = payload.nombre ? categoriaNombreNormalizado(payload.nombre) : current.nombre_normalizado
+
+            const duplicate = await sqlAdmin`
+                SELECT id
+                FROM categorias_catalogo
+                WHERE empresa_id = ${empresaId}
+                  AND nombre_normalizado = ${nextNombreNormalizado}
+                  AND id <> ${id}
+                LIMIT 1
+            `
+            if (duplicate.length > 0) {
+                return reply.code(409).send({ error: 'CATEGORIA_DUPLICADA' })
+            }
+
+            const mergedDefaults = {
+                ...(current.defaults_config ?? {}),
+                ...(payload.defaultsConfig ?? {}),
+            }
+
+            const [updated] = await sqlAdmin`
+                UPDATE categorias_catalogo
+                SET nombre = ${nextNombre},
+                    nombre_normalizado = ${nextNombreNormalizado},
+                    orden_ui_base = ${payload.ordenUiBase ?? current.orden_ui_base},
+                    defaults_config = ${JSON.stringify(mergedDefaults)}::jsonb,
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                RETURNING id, nombre, activa_base, orden_ui_base, defaults_config, actualizado_en
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'categoria_actualizada',
+                entidad: 'categoria_catalogo',
+                entidadId: id,
+                metadata: {
+                    nombre: updated.nombre,
+                },
+                request,
+            })
+
+            return {
+                id: updated.id,
+                nombre: updated.nombre,
+                activaBase: Boolean(updated.activa_base),
+                ordenUiBase: Number(updated.orden_ui_base ?? 0),
+                defaultsConfig: updated.defaults_config ?? {},
+                actualizadoEn: updated.actualizado_en,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.put('/admin/categorias/:id/estado', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { id } = request.params as { id: string }
+            const { activaBase } = estadoCategoriaSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const [updated] = await sqlAdmin`
+                UPDATE categorias_catalogo
+                SET activa_base = ${activaBase},
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                RETURNING id, nombre, activa_base, actualizado_en
+            `
+
+            if (!updated) {
+                return reply.code(404).send({ error: 'Categoria no encontrada' })
+            }
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: activaBase ? 'categoria_activada' : 'categoria_inactivada',
+                entidad: 'categoria_catalogo',
+                entidadId: id,
+                metadata: {
+                    nombre: updated.nombre,
+                    activaBase,
+                },
+                request,
+            })
+
+            return {
+                id: updated.id,
+                nombre: updated.nombre,
+                activaBase: Boolean(updated.activa_base),
+                actualizadoEn: updated.actualizado_en,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.put('/admin/categorias/:id/pv', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { id } = request.params as { id: string }
+            const payload = categoriaPvUpdateSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            await assertPuntoVentaEmpresa(empresaId, payload.puntoVentaId)
+            await assertCategoriaEmpresa(empresaId, id)
+
+            const current = await sqlAdmin`
+                SELECT activa_en_pv, orden_ui_pv
+                FROM categorias_punto_venta
+                WHERE categoria_id = ${id}
+                  AND punto_venta_id = ${payload.puntoVentaId}
+                LIMIT 1
+            `
+
+            const nextActiva = payload.activaEnPv ?? Boolean(current[0]?.activa_en_pv ?? true)
+            const nextOrden = payload.ordenUiPv !== undefined
+                ? payload.ordenUiPv
+                : (current[0]?.orden_ui_pv ?? null)
+
+            const [updated] = await sqlAdmin`
+                INSERT INTO categorias_punto_venta (
+                    categoria_id,
+                    punto_venta_id,
+                    activa_en_pv,
+                    orden_ui_pv
+                )
+                VALUES (
+                    ${id},
+                    ${payload.puntoVentaId},
+                    ${nextActiva},
+                    ${nextOrden}
+                )
+                ON CONFLICT (categoria_id, punto_venta_id)
+                DO UPDATE SET
+                    activa_en_pv = ${nextActiva},
+                    orden_ui_pv = ${nextOrden},
+                    actualizado_en = NOW()
+                RETURNING categoria_id, punto_venta_id, activa_en_pv, orden_ui_pv, actualizado_en
+            `
+
+            await logAuditEvent({
+                empresaId,
+                puntoVentaId: payload.puntoVentaId,
+                usuarioId: session.usuario_id,
+                accion: 'categoria_configurada_pv',
+                entidad: 'categoria_catalogo',
+                entidadId: id,
+                metadata: {
+                    activaEnPv: nextActiva,
+                    ordenUiPv: nextOrden,
+                },
+                request,
+            })
+
+            return {
+                categoriaId: updated.categoria_id,
+                puntoVentaId: updated.punto_venta_id,
+                activaEnPv: Boolean(updated.activa_en_pv),
+                ordenUiPv: updated.orden_ui_pv === null ? null : Number(updated.orden_ui_pv),
+                actualizadoEn: updated.actualizado_en,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
+            if ((err as any)?.codigo === 'CATEGORIA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'CATEGORIA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.post('/admin/categorias/:id/aplicar', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { id } = request.params as { id: string }
+            const payload = categoriaAplicarSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            await assertCategoriaEmpresa(empresaId, id)
+
+            let puntoVentaIds: string[] = []
+            if (payload.scope === 'todos_pv') {
+                const pvs = await sqlAdmin`
+                    SELECT id
+                    FROM puntos_venta
+                    WHERE empresa_id = ${empresaId}
+                      AND activo = true
+                `
+                puntoVentaIds = pvs.map((pv: any) => pv.id as string)
+            } else {
+                if (!payload.puntoVentaIds || payload.puntoVentaIds.length === 0) {
+                    return reply.code(400).send({ error: 'puntoVentaIds es requerido cuando scope=pvs' })
+                }
+                for (const pvId of payload.puntoVentaIds) {
+                    await assertPuntoVentaEmpresa(empresaId, pvId)
+                }
+                puntoVentaIds = [...new Set(payload.puntoVentaIds)]
+            }
+
+            if (puntoVentaIds.length > 0) {
+                const puntoVentaArray = sqlAdmin.array(puntoVentaIds as any)
+                await sqlAdmin`
+                    INSERT INTO categorias_punto_venta (
+                        categoria_id,
+                        punto_venta_id,
+                        activa_en_pv,
+                        orden_ui_pv
+                    )
+                    SELECT
+                        ${id},
+                        pv.id,
+                        ${payload.activaEnPv},
+                        NULL
+                    FROM puntos_venta pv
+                    WHERE pv.id = ANY(${puntoVentaArray}::uuid[])
+                      AND pv.empresa_id = ${empresaId}
+                    ON CONFLICT (categoria_id, punto_venta_id)
+                    DO UPDATE SET
+                        activa_en_pv = ${payload.activaEnPv},
+                        actualizado_en = NOW()
+                `
+            }
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'categoria_aplicada_pvs',
+                entidad: 'categoria_catalogo',
+                entidadId: id,
+                metadata: {
+                    scope: payload.scope,
+                    activaEnPv: payload.activaEnPv,
+                    puntoVentaIds,
+                },
+                request,
+            })
+
+            return {
+                success: true,
+                categoriaId: id,
+                scope: payload.scope,
+                puntoVentaIds,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
+            if ((err as any)?.codigo === 'CATEGORIA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'CATEGORIA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    // Admin: Catalogo ABM
+    fastify.get('/admin/catalogo/items', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { activo, puntoVentaId, categoriaId } = catalogoScopeSchema.parse(request.query ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            if (puntoVentaId) {
+                await assertPuntoVentaEmpresa(empresaId, puntoVentaId)
+            }
+            if (categoriaId) {
+                await assertCategoriaEmpresa(empresaId, categoriaId)
+            }
+
+            const activoFiltro = activo === undefined ? null : activo === 'true'
+
+            const items = await sqlAdmin`
+                SELECT
+                    i.id,
+                    i.nombre,
+                    i.categoria_id,
+                    COALESCE(c.nombre, i.categoria, 'Sin categoría') as categoria,
+                    COALESCE(ipv.precio_venta_pv, i.precio_venta) as precio_venta,
+                    COALESCE(ipv.activo_en_pv, i.activo) as activo,
+                    COALESCE(ipv.orden_ui_pv, i.orden_ui) as orden_ui,
+                    i.creado_en,
+                    i.actualizado_en,
+                    i.costo,
+                    i.maneja_stock,
+                    CASE
+                        WHEN i.maneja_stock = true THEN COALESCE(ipv.stock_actual_pv, i.stock_actual)
+                        ELSE i.stock_actual
+                    END as stock_actual,
+                    CASE
+                        WHEN i.maneja_stock = true THEN COALESCE(ipv.stock_minimo_pv, i.stock_minimo)
+                        ELSE i.stock_minimo
+                    END as stock_minimo,
+                    i.permite_consumo_staff,
+                    i.duracion_min,
+                    i.tipo_cantidad,
+                    i.precio_venta as precio_venta_base,
+                    i.activo as activo_base,
+                    i.orden_ui as orden_ui_base,
+                    ipv.punto_venta_id as override_punto_venta_id,
+                    COALESCE(cpv.activa_en_pv, c.activa_base, true) as categoria_activa_en_pv,
+                    COALESCE(cpv.orden_ui_pv, c.orden_ui_base, 0) as categoria_orden_ui
+                FROM items i
+                LEFT JOIN categorias_catalogo c ON c.id = i.categoria_id
+                LEFT JOIN categorias_punto_venta cpv
+                    ON cpv.categoria_id = i.categoria_id
+                   AND cpv.punto_venta_id = ${puntoVentaId ?? null}
+                LEFT JOIN items_punto_venta ipv
+                    ON ipv.item_id = i.id
+                   AND ipv.punto_venta_id = ${puntoVentaId ?? null}
+                WHERE i.empresa_id = ${empresaId}
+                  ${categoriaId ? sqlAdmin`AND i.categoria_id = ${categoriaId}` : sqlAdmin``}
+                  ${puntoVentaId ? sqlAdmin`AND ipv.punto_venta_id IS NOT NULL` : sqlAdmin``}
+                  ${activoFiltro === null ? sqlAdmin`` : puntoVentaId ? sqlAdmin`AND ipv.activo_en_pv = ${activoFiltro}` : sqlAdmin`AND i.activo = ${activoFiltro}`}
+                ORDER BY COALESCE(cpv.orden_ui_pv, c.orden_ui_base, 0) ASC, COALESCE(ipv.orden_ui_pv, i.orden_ui) ASC, i.nombre ASC
+            `
+
+            return items
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.post('/admin/catalogo/items', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const data = crearCatalogoItemSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            let targetPuntoVentaIds: string[] = []
+
+            if (data.scope === 'solo_pv' && !data.puntoVentaId) {
+                return reply.code(400).send({ error: 'puntoVentaId es requerido para scope solo_pv' })
+            }
+            if (data.puntoVentaId) {
+                await assertPuntoVentaEmpresa(empresaId, data.puntoVentaId)
+            }
+
+            if (data.scope === 'solo_pv') {
+                targetPuntoVentaIds = data.puntoVentaId ? [data.puntoVentaId] : []
+            } else {
+                const pvs = await sqlAdmin`
+                    SELECT id
+                    FROM puntos_venta
+                    WHERE empresa_id = ${empresaId}
+                      AND activo = true
+                `
+                targetPuntoVentaIds = pvs.map((pv: any) => pv.id as string)
+            }
+
+            const item = await sqlAdmin.begin(async (tx: any) => {
+                const categoriaIdResolved = await resolveCategoriaIdFromInput(tx, empresaId, data.categoriaId, data.categoria)
+                const categoriaDefaults = await getCategoriaDefaults(empresaId, categoriaIdResolved)
+                const defaults = (categoriaDefaults?.defaultsConfig ?? {}) as Record<string, any>
+
+                let categoriaNombreLegacy: string | null = data.categoria?.trim() || null
+                if (categoriaIdResolved) {
+                    const categoriaRows = await tx`
+                        SELECT nombre
+                        FROM categorias_catalogo
+                        WHERE id = ${categoriaIdResolved}
+                        LIMIT 1
+                    `
+                    categoriaNombreLegacy = categoriaRows[0]?.nombre ?? categoriaNombreLegacy
+                }
+
+                const manejaStock = data.maneja_stock ?? Boolean(defaults.maneja_stock ?? false)
+                const permiteStaff = data.permite_consumo_staff ?? Boolean(defaults.permite_consumo_staff ?? true)
+                const tipoCantidad = data.tipo_cantidad ?? (defaults.tipo_cantidad === 'entero' || defaults.tipo_cantidad === 'decimal' ? defaults.tipo_cantidad : null)
+                const costo = data.costo ?? 0
+                const stockActual = manejaStock ? (data.stock_actual ?? 0) : 0
+                const stockMinimo = manejaStock ? (data.stock_minimo ?? 0) : 0
+                const duracionMin = data.duracion_min ?? null
+
+                const [base] = await tx`
+                    INSERT INTO items (
+                        nombre,
+                        categoria,
+                        categoria_id,
+                        precio_venta,
+                        activo,
+                        orden_ui,
+                        tipo_cantidad,
+                        costo,
+                        maneja_stock,
+                        stock_actual,
+                        stock_minimo,
+                        permite_consumo_staff,
+                        duracion_min,
+                        empresa_id
+                    )
+                    VALUES (
+                        ${data.nombre.trim()},
+                        ${categoriaNombreLegacy},
+                        ${categoriaIdResolved},
+                        ${data.precio_venta},
+                        ${data.activo ?? true},
+                        ${data.orden_ui ?? 0},
+                        ${tipoCantidad},
+                        ${costo},
+                        ${manejaStock},
+                        ${stockActual},
+                        ${stockMinimo},
+                        ${permiteStaff},
+                        ${duracionMin},
+                        ${empresaId}
+                    )
+                    RETURNING id, nombre, categoria, categoria_id, precio_venta, activo, orden_ui, tipo_cantidad, costo, maneja_stock, stock_actual, stock_minimo, permite_consumo_staff, duracion_min, creado_en, actualizado_en
+                `
+
+                if (targetPuntoVentaIds.length > 0) {
+                    const targetPvArray = tx.array(targetPuntoVentaIds as any)
+                    await tx`
+                        INSERT INTO items_punto_venta (
+                            item_id,
+                            punto_venta_id,
+                            activo_en_pv,
+                            precio_venta_pv,
+                            orden_ui_pv,
+                            stock_actual_pv,
+                            stock_minimo_pv
+                        )
+                        SELECT
+                            ${base.id},
+                            pv.id,
+                            ${data.activo ?? true},
+                            NULL,
+                            NULL,
+                            ${manejaStock ? stockActual : null},
+                            ${manejaStock ? stockMinimo : null}
+                        FROM puntos_venta pv
+                        WHERE pv.id = ANY(${targetPvArray}::uuid[])
+                          AND pv.empresa_id = ${empresaId}
+                        ON CONFLICT (item_id, punto_venta_id)
+                        DO NOTHING
+                    `
+                }
+
+                if (categoriaIdResolved && targetPuntoVentaIds.length > 0) {
+                    const targetPvArray = tx.array(targetPuntoVentaIds as any)
+                    await tx`
+                        INSERT INTO categorias_punto_venta (
+                            categoria_id,
+                            punto_venta_id,
+                            activa_en_pv,
+                            orden_ui_pv
+                        )
+                        SELECT
+                            ${categoriaIdResolved},
+                            pv.id,
+                            true,
+                            NULL
+                        FROM puntos_venta pv
+                        WHERE pv.id = ANY(${targetPvArray}::uuid[])
+                          AND pv.empresa_id = ${empresaId}
+                        ON CONFLICT (categoria_id, punto_venta_id)
+                        DO UPDATE SET
+                            activa_en_pv = true,
+                            actualizado_en = NOW()
+                    `
+                }
+
+                return base
+            })
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'catalogo_item_creado',
+                entidad: 'item',
+                entidadId: item.id,
+                metadata: {
+                    nombre: item.nombre,
+                    scope: data.scope,
+                    puntoVentaId: data.puntoVentaId ?? null,
+                    categoriaId: item.categoria_id ?? null,
+                },
+                request,
+            })
+
+            return item
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'CATEGORIA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'CATEGORIA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.put('/admin/catalogo/items/:id', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { id } = request.params as { id: string }
+            const data = actualizarCatalogoItemSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const rows = await sqlAdmin`
+                SELECT id, nombre, categoria, categoria_id, precio_venta, activo, orden_ui, tipo_cantidad, costo, maneja_stock, stock_actual, stock_minimo, permite_consumo_staff, duracion_min
+                FROM items
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                LIMIT 1
+            `
+            if (rows.length === 0) {
+                return reply.code(404).send({ error: 'Item no encontrado' })
+            }
+
+            const current = rows[0]
+            const resolvedCategoriaId = (data.categoriaId !== undefined || data.categoria !== undefined)
+                ? await resolveCategoriaIdFromInput(sqlAdmin, empresaId, data.categoriaId, data.categoria)
+                : current.categoria_id
+
+            let categoriaNombreLegacy = current.categoria
+            if (resolvedCategoriaId) {
+                const categoriaRows = await sqlAdmin`
+                    SELECT nombre
+                    FROM categorias_catalogo
+                    WHERE id = ${resolvedCategoriaId}
+                      AND empresa_id = ${empresaId}
+                    LIMIT 1
+                `
+                categoriaNombreLegacy = categoriaRows[0]?.nombre ?? categoriaNombreLegacy
+            } else if (data.categoriaId === null) {
+                categoriaNombreLegacy = null
+            } else if (data.categoria !== undefined) {
+                categoriaNombreLegacy = data.categoria?.trim() || null
+            }
+
+            const [updated] = await sqlAdmin`
+                UPDATE items
+                SET nombre = ${data.nombre?.trim() || current.nombre},
+                    categoria = ${categoriaNombreLegacy},
+                    categoria_id = ${resolvedCategoriaId ?? null},
+                    precio_venta = ${data.precio_venta ?? current.precio_venta},
+                    activo = ${data.activo ?? current.activo},
+                    orden_ui = ${data.orden_ui ?? current.orden_ui},
+                    tipo_cantidad = ${data.tipo_cantidad ?? current.tipo_cantidad ?? null},
+                    costo = ${data.costo ?? current.costo ?? 0},
+                    maneja_stock = ${data.maneja_stock ?? current.maneja_stock ?? false},
+                    stock_actual = ${data.stock_actual ?? current.stock_actual ?? 0},
+                    stock_minimo = ${data.stock_minimo ?? current.stock_minimo ?? 0},
+                    permite_consumo_staff = ${data.permite_consumo_staff ?? current.permite_consumo_staff ?? true},
+                    duracion_min = ${data.duracion_min ?? current.duracion_min ?? null},
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                RETURNING id, nombre, categoria, categoria_id, precio_venta, activo, orden_ui, tipo_cantidad, costo, maneja_stock, stock_actual, stock_minimo, permite_consumo_staff, duracion_min, actualizado_en
+            `
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: 'catalogo_item_actualizado',
+                entidad: 'item',
+                entidadId: id,
+                metadata: {
+                    nombre: updated.nombre,
+                    categoriaId: updated.categoria_id ?? null,
+                },
+                request,
+            })
+
+            return updated
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'CATEGORIA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'CATEGORIA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.put('/admin/catalogo/items/:id/estado', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { id } = request.params as { id: string }
+            const { activo } = estadoCatalogoItemSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const [updated] = await sqlAdmin`
+                UPDATE items
+                SET activo = ${activo},
+                    actualizado_en = NOW()
+                WHERE id = ${id}
+                  AND empresa_id = ${empresaId}
+                RETURNING id, nombre, activo, actualizado_en
+            `
+
+            if (!updated) {
+                return reply.code(404).send({ error: 'Item no encontrado' })
+            }
+
+            await logAuditEvent({
+                empresaId,
+                usuarioId: session.usuario_id,
+                accion: activo ? 'catalogo_item_activado' : 'catalogo_item_inactivado',
+                entidad: 'item',
+                entidadId: id,
+                metadata: {
+                    activo,
+                    nombre: updated.nombre,
+                },
+                request,
+            })
+
+            return updated
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.get('/admin/catalogo/items/:id/pv-opciones', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const { id } = request.params as { id: string }
+            const { excludePuntoVentaId } = catalogoPvOpcionesSchema.parse(request.query ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            const itemRows = await sqlAdmin`
+                SELECT i.id
+                FROM items i
+                WHERE i.id = ${id}
+                  AND i.empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (itemRows.length === 0) {
+                return reply.code(404).send({ error: 'Item no encontrado' })
+            }
+
+            const opciones = await sqlAdmin`
+                SELECT
+                    pv.id AS punto_venta_id,
+                    pv.nombre AS punto_venta_nombre,
+                    COALESCE(ipv.precio_venta_pv, i.precio_venta) AS precio_venta,
+                    COALESCE(i.costo, 0) AS costo,
+                    COALESCE(ipv.stock_minimo_pv, i.stock_minimo, 0) AS stock_minimo,
+                    COALESCE(i.permite_consumo_staff, true) AS permite_consumo_staff,
+                    COALESCE(ipv.orden_ui_pv, i.orden_ui, 0) AS orden_ui
+                FROM items i
+                JOIN items_punto_venta ipv ON ipv.item_id = i.id
+                JOIN puntos_venta pv ON pv.id = ipv.punto_venta_id
+                WHERE i.id = ${id}
+                  AND i.empresa_id = ${empresaId}
+                  AND pv.activo = true
+                  AND ipv.activo_en_pv = true
+                  AND ${excludePuntoVentaId ? sqlAdmin`ipv.punto_venta_id <> ${excludePuntoVentaId}` : sqlAdmin`TRUE`}
+                ORDER BY pv.nombre ASC
+            `
+
+            return opciones.map((o: any) => ({
+                puntoVentaId: o.punto_venta_id,
+                puntoVentaNombre: o.punto_venta_nombre,
+                precioVentaPv: Number(o.precio_venta ?? 0),
+                costo: Number(o.costo ?? 0),
+                stockMinimoPv: Number(o.stock_minimo ?? 0),
+                permiteConsumoStaff: Boolean(o.permite_consumo_staff),
+                ordenUiPv: Number(o.orden_ui ?? 0),
+            }))
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.post('/admin/inventario/ajuste', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const payload = inventarioAjusteSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            await assertPuntoVentaEmpresa(empresaId, payload.puntoVentaId)
+
+            const items = await sqlAdmin`
+                SELECT i.id, i.nombre, i.maneja_stock, i.stock_actual, i.stock_minimo
+                FROM items i
+                WHERE i.id = ${payload.itemId}
+                  AND i.empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (items.length === 0) {
+                return reply.code(404).send({ error: 'Item no encontrado' })
+            }
+
+            const item = items[0]
+            if (!item.maneja_stock) {
+                return reply.code(409).send({ error: 'El item no maneja stock' })
+            }
+
+            const existingPvRows = await sqlAdmin`
+                SELECT id, stock_actual_pv
+                FROM items_punto_venta
+                WHERE item_id = ${payload.itemId}
+                  AND punto_venta_id = ${payload.puntoVentaId}
+                LIMIT 1
+            `
+
+            if (existingPvRows.length === 0) {
+                return reply.code(409).send({
+                    error: 'ITEM_NO_EXISTE_EN_PV',
+                    mensaje: 'Este producto no existe en el punto de venta seleccionado. Debes crearlo en ese PV antes de registrar compra.',
+                })
+            }
+
+            const result = await sqlAdmin.begin(async (tx: any) => {
+                const currentRows = await tx`
+                    SELECT stock_actual_pv
+                    FROM items_punto_venta
+                    WHERE item_id = ${payload.itemId}
+                      AND punto_venta_id = ${payload.puntoVentaId}
+                    LIMIT 1
+                `
+
+                const stockAnterior = Number(currentRows[0]?.stock_actual_pv ?? 0)
+                const stockNuevo = Number(payload.nuevoStock)
+                const diferencia = stockNuevo - stockAnterior
+
+                await tx`
+                    UPDATE items_punto_venta
+                    SET stock_actual_pv = ${stockNuevo},
+                        actualizado_en = NOW()
+                    WHERE item_id = ${payload.itemId}
+                      AND punto_venta_id = ${payload.puntoVentaId}
+                `
+
+                await tx`
+                    INSERT INTO inventario_movimientos (
+                        empresa_id,
+                        punto_venta_id,
+                        item_id,
+                        usuario_id,
+                        tipo_movimiento,
+                        cantidad,
+                        stock_anterior,
+                        stock_nuevo,
+                        motivo,
+                        metadata
+                    )
+                    VALUES (
+                        ${empresaId},
+                        ${payload.puntoVentaId},
+                        ${payload.itemId},
+                        ${session.usuario_id},
+                        'ajuste_manual',
+                        ${diferencia},
+                        ${stockAnterior},
+                        ${stockNuevo},
+                        ${payload.motivo.trim()},
+                        ${JSON.stringify({ origen: 'admin_catalogo' })}::jsonb
+                    )
+                `
+
+                return {
+                    stockAnterior,
+                    stockNuevo,
+                    diferencia,
+                }
+            })
+
+            await logAuditEvent({
+                empresaId,
+                puntoVentaId: payload.puntoVentaId,
+                usuarioId: session.usuario_id,
+                accion: 'stock_ajuste_manual',
+                entidad: 'item',
+                entidadId: payload.itemId,
+                metadata: {
+                    itemNombre: item.nombre,
+                    motivo: payload.motivo,
+                    stockAnterior: result.stockAnterior,
+                    stockNuevo: result.stockNuevo,
+                    diferencia: result.diferencia,
+                },
+                request,
+            })
+
+            return {
+                success: true,
+                ...result,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.post('/admin/inventario/compra', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const payload = inventarioCompraSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            await assertPuntoVentaEmpresa(empresaId, payload.puntoVentaId)
+
+            const items = await sqlAdmin`
+                SELECT i.id, i.nombre, i.maneja_stock, i.stock_actual, i.stock_minimo
+                FROM items i
+                WHERE i.id = ${payload.itemId}
+                  AND i.empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (items.length === 0) {
+                return reply.code(404).send({ error: 'Item no encontrado' })
+            }
+
+            const item = items[0]
+            if (!item.maneja_stock) {
+                return reply.code(409).send({ error: 'El item no maneja stock' })
+            }
+
+            const cantidad = Number(payload.cantidad)
+            const costoTotal = payload.costoTotal !== undefined
+                ? Number(payload.costoTotal)
+                : Number(payload.costoUnitario ?? 0) * cantidad
+            const costoUnitario = payload.costoUnitario !== undefined
+                ? Number(payload.costoUnitario)
+                : (cantidad > 0 ? costoTotal / cantidad : 0)
+
+            const cajas = await sqlAdmin`
+                SELECT id, abierta
+                FROM cajas
+                WHERE empresa_id = ${empresaId}
+                  AND punto_venta_id = ${payload.puntoVentaId}
+                  AND activa = true
+                ORDER BY actualizado_en DESC
+                LIMIT 1
+            `
+
+            const caja = cajas[0]
+            if (payload.imputaCaja && (!caja || !caja.abierta)) {
+                return reply.code(409).send({
+                    error: 'CAJA_CERRADA_COMPRA_NO_IMPUTABLE',
+                    mensaje: 'No hay caja abierta en el punto de venta para imputar la compra',
+                })
+            }
+
+            const result = await sqlAdmin.begin(async (tx: any) => {
+                await tx`
+                    INSERT INTO items_punto_venta (
+                        item_id,
+                        punto_venta_id,
+                        activo_en_pv,
+                        stock_actual_pv,
+                        stock_minimo_pv
+                    )
+                    VALUES (
+                        ${payload.itemId},
+                        ${payload.puntoVentaId},
+                        true,
+                        ${item.stock_actual ?? 0},
+                        ${item.stock_minimo ?? 0}
+                    )
+                    ON CONFLICT (item_id, punto_venta_id)
+                    DO NOTHING
+                `
+
+                const currentRows = await tx`
+                    SELECT stock_actual_pv
+                    FROM items_punto_venta
+                    WHERE item_id = ${payload.itemId}
+                      AND punto_venta_id = ${payload.puntoVentaId}
+                    LIMIT 1
+                `
+
+                const stockAnterior = Number(currentRows[0]?.stock_actual_pv ?? 0)
+                const stockNuevo = stockAnterior + cantidad
+
+                await tx`
+                    UPDATE items_punto_venta
+                    SET stock_actual_pv = ${stockNuevo},
+                        actualizado_en = NOW()
+                    WHERE item_id = ${payload.itemId}
+                      AND punto_venta_id = ${payload.puntoVentaId}
+                `
+
+                const movs = await tx`
+                    INSERT INTO inventario_movimientos (
+                        empresa_id,
+                        punto_venta_id,
+                        item_id,
+                        usuario_id,
+                        tipo_movimiento,
+                        cantidad,
+                        stock_anterior,
+                        stock_nuevo,
+                        costo_unitario,
+                        costo_total,
+                        motivo,
+                        referencia_tipo,
+                        metadata
+                    )
+                    VALUES (
+                        ${empresaId},
+                        ${payload.puntoVentaId},
+                        ${payload.itemId},
+                        ${session.usuario_id},
+                        'compra_ingreso',
+                        ${cantidad},
+                        ${stockAnterior},
+                        ${stockNuevo},
+                        ${costoUnitario},
+                        ${costoTotal},
+                        ${payload.descripcion?.trim() || null},
+                        'compra_stock',
+                        ${JSON.stringify({ proveedor: payload.proveedor ?? null, referencia: payload.referencia ?? null })}::jsonb
+                    )
+                    RETURNING id
+                `
+
+                const inventarioMovimientoId = movs[0]?.id as string | undefined
+
+                if (payload.imputaCaja) {
+                    await tx`
+                        INSERT INTO caja_movimientos (
+                            empresa_id,
+                            punto_venta_id,
+                            caja_id,
+                            usuario_id,
+                            tipo,
+                            categoria,
+                            monto,
+                            imputa_caja,
+                            referencia_tipo,
+                            referencia_id,
+                            descripcion,
+                            metadata
+                        )
+                        VALUES (
+                            ${empresaId},
+                            ${payload.puntoVentaId},
+                            ${caja?.id ?? null},
+                            ${session.usuario_id},
+                            'egreso',
+                            'compra_stock',
+                            ${costoTotal},
+                            true,
+                            'inventario_movimiento',
+                            ${inventarioMovimientoId ?? null},
+                            ${payload.descripcion?.trim() || `Compra de stock: ${item.nombre}`},
+                            ${JSON.stringify({ proveedor: payload.proveedor ?? null, referencia: payload.referencia ?? null })}::jsonb
+                        )
+                    `
+                }
+
+                return {
+                    stockAnterior,
+                    stockNuevo,
+                    cantidad,
+                    costoUnitario,
+                    costoTotal,
+                }
+            })
+
+            await logAuditEvent({
+                empresaId,
+                puntoVentaId: payload.puntoVentaId,
+                usuarioId: session.usuario_id,
+                accion: 'stock_compra_registrada',
+                entidad: 'item',
+                entidadId: payload.itemId,
+                metadata: {
+                    itemNombre: item.nombre,
+                    cantidad: result.cantidad,
+                    costoUnitario: result.costoUnitario,
+                    costoTotal: result.costoTotal,
+                    imputaCaja: payload.imputaCaja,
+                    proveedor: payload.proveedor ?? null,
+                    referencia: payload.referencia ?? null,
+                },
+                request,
+            })
+
+            return {
+                success: true,
+                ...result,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
+    fastify.post('/admin/inventario/compra-con-alta-pv', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) return reply.code(401).send({ error: 'No autorizado' })
+
+        const session = await authService.verifySession(token)
+        if (!session) return reply.code(401).send({ error: 'Sesión inválida' })
+
+        try {
+            const payload = inventarioCompraConAltaPvSchema.parse(request.body ?? {})
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            await assertPuntoVentaEmpresa(empresaId, payload.puntoVentaDestinoId)
+
+            const items = await sqlAdmin`
+                SELECT i.id, i.nombre, i.categoria_id, i.precio_venta, i.orden_ui, i.maneja_stock, i.costo, i.stock_minimo, i.permite_consumo_staff
+                FROM items i
+                WHERE i.id = ${payload.itemId}
+                  AND i.empresa_id = ${empresaId}
+                LIMIT 1
+            `
+
+            if (items.length === 0) {
+                return reply.code(404).send({ error: 'Item no encontrado' })
+            }
+
+            const item = items[0]
+            if (!item.maneja_stock) {
+                return reply.code(409).send({ error: 'El item no maneja stock' })
+            }
+
+            const alreadyInDestino = await sqlAdmin`
+                SELECT id
+                FROM items_punto_venta
+                WHERE item_id = ${payload.itemId}
+                  AND punto_venta_id = ${payload.puntoVentaDestinoId}
+                LIMIT 1
+            `
+
+            if (alreadyInDestino.length > 0) {
+                return reply.code(409).send({
+                    error: 'ITEM_YA_EXISTE_EN_PV',
+                    mensaje: 'El producto ya existe en el punto de venta destino. Usa registrar compra normal.',
+                })
+            }
+
+            let config: {
+                precioVentaPv: number
+                costo: number
+                stockMinimoPv: number
+                permiteConsumoStaff: boolean
+                ordenUiPv: number
+                puntoVentaOrigenId?: string | null
+            }
+
+            if (payload.modoConfiguracion === 'copiar') {
+                if (!payload.puntoVentaOrigenId) {
+                    return reply.code(400).send({ error: 'puntoVentaOrigenId es requerido cuando modoConfiguracion = copiar' })
+                }
+                await assertPuntoVentaEmpresa(empresaId, payload.puntoVentaOrigenId)
+
+                const origenRows = await sqlAdmin`
+                    SELECT
+                        COALESCE(ipv.precio_venta_pv, i.precio_venta) as precio_venta,
+                        i.costo,
+                        COALESCE(ipv.stock_minimo_pv, i.stock_minimo, 0) as stock_minimo,
+                        i.permite_consumo_staff,
+                        COALESCE(ipv.orden_ui_pv, i.orden_ui, 0) as orden_ui
+                    FROM items i
+                    JOIN items_punto_venta ipv ON ipv.item_id = i.id
+                    WHERE i.id = ${payload.itemId}
+                      AND i.empresa_id = ${empresaId}
+                      AND ipv.punto_venta_id = ${payload.puntoVentaOrigenId}
+                    LIMIT 1
+                `
+
+                if (origenRows.length === 0) {
+                    return reply.code(409).send({
+                        error: 'ITEM_NO_EXISTE_EN_PV_ORIGEN',
+                        mensaje: 'No se encontró configuración del producto en el punto de venta origen seleccionado.',
+                    })
+                }
+
+                const origen = origenRows[0]
+                config = {
+                    precioVentaPv: Number(origen.precio_venta ?? item.precio_venta ?? 0),
+                    costo: Number(origen.costo ?? item.costo ?? 0),
+                    stockMinimoPv: Number(origen.stock_minimo ?? 0),
+                    permiteConsumoStaff: Boolean(origen.permite_consumo_staff ?? item.permite_consumo_staff ?? true),
+                    ordenUiPv: Number(origen.orden_ui ?? item.orden_ui ?? 0),
+                    puntoVentaOrigenId: payload.puntoVentaOrigenId,
+                }
+            } else {
+                if (!payload.configuracionManual) {
+                    return reply.code(400).send({ error: 'configuracionManual es requerida cuando modoConfiguracion = manual' })
+                }
+                config = {
+                    precioVentaPv: Number(payload.configuracionManual.precioVentaPv),
+                    costo: Number(payload.configuracionManual.costo),
+                    stockMinimoPv: Number(payload.configuracionManual.stockMinimoPv ?? 0),
+                    permiteConsumoStaff: Boolean(payload.configuracionManual.permiteConsumoStaff),
+                    ordenUiPv: Number(payload.configuracionManual.ordenUiPv ?? 0),
+                    puntoVentaOrigenId: null,
+                }
+            }
+
+            const cantidad = Number(payload.cantidad)
+            const costoTotal = payload.costoTotal !== undefined
+                ? Number(payload.costoTotal)
+                : Number(payload.costoUnitario ?? config.costo ?? 0) * cantidad
+            const costoUnitario = payload.costoUnitario !== undefined
+                ? Number(payload.costoUnitario)
+                : (cantidad > 0 ? costoTotal / cantidad : 0)
+
+            const cajas = await sqlAdmin`
+                SELECT id, abierta
+                FROM cajas
+                WHERE empresa_id = ${empresaId}
+                  AND punto_venta_id = ${payload.puntoVentaDestinoId}
+                  AND activa = true
+                ORDER BY actualizado_en DESC
+                LIMIT 1
+            `
+
+            const caja = cajas[0]
+            if (payload.imputaCaja && (!caja || !caja.abierta)) {
+                return reply.code(409).send({
+                    error: 'CAJA_CERRADA_COMPRA_NO_IMPUTABLE',
+                    mensaje: 'No hay caja abierta en el punto de venta para imputar la compra',
+                })
+            }
+
+            const result = await sqlAdmin.begin(async (tx: any) => {
+                await tx`
+                    INSERT INTO items_punto_venta (
+                        item_id,
+                        punto_venta_id,
+                        activo_en_pv,
+                        precio_venta_pv,
+                        orden_ui_pv,
+                        stock_actual_pv,
+                        stock_minimo_pv
+                    )
+                    VALUES (
+                        ${payload.itemId},
+                        ${payload.puntoVentaDestinoId},
+                        true,
+                        ${config.precioVentaPv},
+                        ${config.ordenUiPv},
+                        0,
+                        ${config.stockMinimoPv}
+                    )
+                `
+
+                if (item.categoria_id) {
+                    await tx`
+                        INSERT INTO categorias_punto_venta (
+                            categoria_id,
+                            punto_venta_id,
+                            activa_en_pv,
+                            orden_ui_pv
+                        )
+                        VALUES (
+                            ${item.categoria_id},
+                            ${payload.puntoVentaDestinoId},
+                            true,
+                            NULL
+                        )
+                        ON CONFLICT (categoria_id, punto_venta_id)
+                        DO UPDATE SET
+                            activa_en_pv = true,
+                            actualizado_en = NOW()
+                    `
+                }
+
+                await tx`
+                    UPDATE items
+                    SET costo = ${config.costo},
+                        permite_consumo_staff = ${config.permiteConsumoStaff}
+                    WHERE id = ${payload.itemId}
+                `
+
+                const stockAnterior = 0
+                const stockNuevo = cantidad
+
+                await tx`
+                    UPDATE items_punto_venta
+                    SET stock_actual_pv = ${stockNuevo},
+                        actualizado_en = NOW()
+                    WHERE item_id = ${payload.itemId}
+                      AND punto_venta_id = ${payload.puntoVentaDestinoId}
+                `
+
+                const movs = await tx`
+                    INSERT INTO inventario_movimientos (
+                        empresa_id,
+                        punto_venta_id,
+                        item_id,
+                        usuario_id,
+                        tipo_movimiento,
+                        cantidad,
+                        stock_anterior,
+                        stock_nuevo,
+                        costo_unitario,
+                        costo_total,
+                        motivo,
+                        referencia_tipo,
+                        metadata
+                    )
+                    VALUES (
+                        ${empresaId},
+                        ${payload.puntoVentaDestinoId},
+                        ${payload.itemId},
+                        ${session.usuario_id},
+                        'compra_ingreso',
+                        ${cantidad},
+                        ${stockAnterior},
+                        ${stockNuevo},
+                        ${costoUnitario},
+                        ${costoTotal},
+                        ${payload.descripcion?.trim() || null},
+                        'compra_stock',
+                        ${JSON.stringify({ proveedor: payload.proveedor ?? null, referencia: payload.referencia ?? null, altaPvNueva: true, modoConfiguracion: payload.modoConfiguracion, puntoVentaOrigenId: config.puntoVentaOrigenId ?? null })}::jsonb
+                    )
+                    RETURNING id
+                `
+
+                const inventarioMovimientoId = movs[0]?.id as string | undefined
+
+                if (payload.imputaCaja) {
+                    await tx`
+                        INSERT INTO caja_movimientos (
+                            empresa_id,
+                            punto_venta_id,
+                            caja_id,
+                            usuario_id,
+                            tipo,
+                            categoria,
+                            monto,
+                            imputa_caja,
+                            referencia_tipo,
+                            referencia_id,
+                            descripcion,
+                            metadata
+                        )
+                        VALUES (
+                            ${empresaId},
+                            ${payload.puntoVentaDestinoId},
+                            ${caja?.id ?? null},
+                            ${session.usuario_id},
+                            'egreso',
+                            'compra_stock',
+                            ${costoTotal},
+                            true,
+                            'inventario_movimiento',
+                            ${inventarioMovimientoId ?? null},
+                            ${payload.descripcion?.trim() || `Compra de stock: ${item.nombre}`},
+                            ${JSON.stringify({ proveedor: payload.proveedor ?? null, referencia: payload.referencia ?? null })}::jsonb
+                        )
+                    `
+                }
+
+                return {
+                    stockAnterior,
+                    stockNuevo,
+                    cantidad,
+                    costoUnitario,
+                    costoTotal,
+                }
+            })
+
+            await logAuditEvent({
+                empresaId,
+                puntoVentaId: payload.puntoVentaDestinoId,
+                usuarioId: session.usuario_id,
+                accion: 'catalogo_item_asignado_pv',
+                entidad: 'item',
+                entidadId: payload.itemId,
+                metadata: {
+                    itemNombre: item.nombre,
+                    modoConfiguracion: payload.modoConfiguracion,
+                    puntoVentaOrigenId: config.puntoVentaOrigenId ?? null,
+                    precioVentaPv: config.precioVentaPv,
+                    costo: config.costo,
+                    stockMinimoPv: config.stockMinimoPv,
+                    permiteConsumoStaff: config.permiteConsumoStaff,
+                    ordenUiPv: config.ordenUiPv,
+                },
+                request,
+            })
+
+            await logAuditEvent({
+                empresaId,
+                puntoVentaId: payload.puntoVentaDestinoId,
+                usuarioId: session.usuario_id,
+                accion: 'stock_compra_registrada',
+                entidad: 'item',
+                entidadId: payload.itemId,
+                metadata: {
+                    itemNombre: item.nombre,
+                    cantidad: result.cantidad,
+                    costoUnitario: result.costoUnitario,
+                    costoTotal: result.costoTotal,
+                    imputaCaja: payload.imputaCaja,
+                    proveedor: payload.proveedor ?? null,
+                    referencia: payload.referencia ?? null,
+                    altaPvNueva: true,
+                    modoConfiguracion: payload.modoConfiguracion,
+                },
+                request,
+            })
+
+            return {
+                success: true,
+                altaPvNueva: true,
+                ...result,
+            }
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                return reply.code(400).send({ error: 'Datos inválidos', details: err.errors })
+            }
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
             }
             fastify.log.error(err)
             return reply.code(500).send({ error: 'Error interno de servidor' })
@@ -488,6 +2792,9 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             }
 
             const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            if (scope === 'pv' && puntoVentaId) {
+                await assertPuntoVentaEmpresa(empresaId, puntoVentaId)
+            }
             const effective = await getOperativeConfig(empresaId, scope === 'pv' ? puntoVentaId : null)
 
             const wherePv = scope === 'pv' ? puntoVentaId : null
@@ -530,6 +2837,9 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             }
 
             const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            if (scope === 'pv' && puntoVentaId) {
+                await assertPuntoVentaEmpresa(empresaId, puntoVentaId)
+            }
             const wherePv = scope === 'pv' ? puntoVentaId : null
 
             const existing = await sql`
@@ -847,8 +3157,14 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 WHERE id = ${id}
             `
 
+            await reintegrarStockPorAnulacion({
+                transaccionId: id,
+                puntoVentaId: venta.punto_venta_id,
+            })
+
             await logAuditEvent({
                 empresaId,
+                puntoVentaId: venta.punto_venta_id,
                 usuarioId: session.usuario_id,
                 accion: 'venta_anulada',
                 entidad: 'transaccion',
@@ -872,6 +3188,33 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
     })
 
     // Admin: Auditoria basica
+    fastify.get('/admin/auditoria/acciones', async (request, reply) => {
+        const token = request.headers.authorization?.replace('Bearer ', '')
+        if (!token) {
+            return reply.code(401).send({ error: 'No autorizado' })
+        }
+
+        const session = await authService.verifySession(token)
+        if (!session) {
+            return reply.code(401).send({ error: 'Sesión inválida' })
+        }
+
+        try {
+            const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+            const acciones = await sql<{ accion: string }[]>`
+                SELECT DISTINCT accion
+                FROM auditoria_eventos
+                WHERE empresa_id = ${empresaId}
+                ORDER BY accion ASC
+            `
+
+            return acciones.map((item) => item.accion)
+        } catch (err) {
+            fastify.log.error(err)
+            return reply.code(500).send({ error: 'Error interno de servidor' })
+        }
+    })
+
     fastify.get('/admin/auditoria', async (request, reply) => {
         const token = request.headers.authorization?.replace('Bearer ', '')
         if (!token) {
@@ -886,11 +3229,16 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
         try {
             const query = request.query as any
             const accion = query.accion
+            const puntoVentaId = query.puntoVentaId
             const fechaDesde = query.fechaDesde
             const fechaHasta = query.fechaHasta
             const limit = parseInt(query.limit) || 100
             const offset = parseInt(query.offset) || 0
             const empresaId = await obtenerEmpresaIdDesdeUsuario(session.usuario_id)
+
+            if (puntoVentaId) {
+                await assertPuntoVentaEmpresa(empresaId, puntoVentaId)
+            }
 
             const eventos = await sql`
                 SELECT
@@ -906,6 +3254,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 FROM auditoria_eventos a
                 LEFT JOIN usuarios u ON a.usuario_id = u.id
                 WHERE a.empresa_id = ${empresaId}
+                ${puntoVentaId ? sql`AND a.punto_venta_id = ${puntoVentaId}` : sql``}
                 ${accion ? sql`AND a.accion = ${accion}` : sql``}
                 ${fechaDesde ? sql`AND DATE(a.creado_en) >= ${fechaDesde}` : sql``}
                 ${fechaHasta ? sql`AND DATE(a.creado_en) <= ${fechaHasta}` : sql``}
@@ -917,6 +3266,9 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
             return eventos
         } catch (err) {
             fastify.log.error(err)
+            if ((err as any)?.codigo === 'PUNTO_VENTA_FUERA_EMPRESA') {
+                return reply.code(403).send({ error: 'PUNTO_VENTA_FUERA_EMPRESA' })
+            }
             return reply.code(500).send({ error: 'Error interno de servidor' })
         }
     })
@@ -1157,6 +3509,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             await logAuditEvent({
                 empresaId,
+                puntoVentaId,
                 usuarioId: session.usuario_id,
                 accion: 'fuera_caja_decision_masiva',
                 entidad: 'transaccion',
@@ -1303,6 +3656,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             await logAuditEvent({
                 empresaId,
+                puntoVentaId: cajas[0]?.punto_venta_id ?? null,
                 usuarioId: session.usuario_id,
                 accion: 'caja_apertura',
                 entidad: 'caja',
@@ -1526,9 +3880,23 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 )
             `
 
+            const movimientosCaja = await sql`
+                SELECT
+                    COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE 0 END), 0) as total_ingresos,
+                    COALESCE(SUM(CASE WHEN tipo = 'egreso' THEN monto ELSE 0 END), 0) as total_egresos
+                FROM caja_movimientos
+                WHERE empresa_id = ${empresaId}
+                  AND punto_venta_id = ${caja.punto_venta_id}
+                  AND caja_id = ${cajaId}
+                  AND imputa_caja = true
+                  AND creado_en >= ${caja.fecha_apertura_actual}
+            `
+
             const montoInicial = Number(caja.monto_inicial_actual)
             const totalEfectivo = Number(totales[0].total_efectivo)
-            const montoEsperado = montoInicial + totalEfectivo + (incluirFueraCajaFinal ? totalFueraCajaPendiente : 0)
+            const totalIngresosCaja = Number(movimientosCaja[0]?.total_ingresos ?? 0)
+            const totalEgresosCaja = Number(movimientosCaja[0]?.total_egresos ?? 0)
+            const montoEsperado = montoInicial + totalEfectivo + totalIngresosCaja - totalEgresosCaja + (incluirFueraCajaFinal ? totalFueraCajaPendiente : 0)
             const diferencia = Number(montoReal) - montoEsperado
             const fechaOperativa = new Date(caja.fecha_apertura_actual ?? new Date()).toISOString().slice(0, 10)
 
@@ -1637,6 +4005,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
 
             await logAuditEvent({
                 empresaId,
+                puntoVentaId: caja.punto_venta_id,
                 usuarioId: session.usuario_id,
                 accion: 'caja_cierre',
                 entidad: 'caja',
@@ -1646,6 +4015,8 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                     montoReal: Number(montoReal),
                     montoEsperado,
                     diferencia,
+                    totalIngresosCaja,
+                    totalEgresosCaja,
                     incluirFueraCaja: incluirFueraCajaFinal,
                     fueraCajaConciliadas: incluirFueraCajaFinal ? cantidadFueraCajaPendiente : 0,
                     consumosAplicados: resultadoConsumos,
@@ -1657,6 +4028,8 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 success: true,
                 cierreId: cierre[0].id,
                 diferencia: diferencia,
+                totalIngresosCaja,
+                totalEgresosCaja,
                 incluirFueraCaja: incluirFueraCajaFinal,
                 fueraCajaConciliadas: incluirFueraCajaFinal ? cantidadFueraCajaPendiente : 0,
                 totalFueraCajaConciliado: incluirFueraCajaFinal ? totalFueraCajaPendiente : 0,
@@ -1728,9 +4101,23 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 )
             `
 
+            const movimientosCaja = await sql`
+                SELECT
+                    COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE 0 END), 0) as total_ingresos,
+                    COALESCE(SUM(CASE WHEN tipo = 'egreso' THEN monto ELSE 0 END), 0) as total_egresos
+                FROM caja_movimientos
+                WHERE empresa_id = ${empresaId}
+                  AND punto_venta_id = ${caja.punto_venta_id}
+                  AND caja_id = ${cajaId}
+                  AND imputa_caja = true
+                  AND creado_en >= ${caja.fecha_apertura_actual}
+            `
+
             const montoInicial = Number(caja.monto_inicial_actual)
             const totalEfectivo = Number(totales[0].total_efectivo)
-            const montoEsperado = montoInicial + totalEfectivo
+            const totalIngresosCaja = Number(movimientosCaja[0]?.total_ingresos ?? 0)
+            const totalEgresosCaja = Number(movimientosCaja[0]?.total_egresos ?? 0)
+            const montoEsperado = montoInicial + totalEfectivo + totalIngresosCaja - totalEgresosCaja
 
             const fueraCajaPendientes = await sql`
                 SELECT
@@ -1755,6 +4142,8 @@ const adminRoutes: FastifyPluginAsync = async (fastify, opts) => {
                 totalEfectivo: totalEfectivo,
                 totalTarjeta: Number(totales[0].total_tarjeta),
                 totalTransferencia: Number(totales[0].total_transferencia),
+                totalIngresosCaja,
+                totalEgresosCaja,
                 montoEsperado: montoEsperado,
                 fueraCajaPendientesCantidad: Number(fueraCajaPendientes[0].cantidad),
                 fueraCajaPendientesTotal: Number(fueraCajaPendientes[0].total)
